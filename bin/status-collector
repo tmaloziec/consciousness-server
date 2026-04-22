@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""status-collector — long-lived WS subscriber that maintains a snapshot of
+all agent FSM states in /tmp/cs-agent-status.json.
+
+Why a daemon: tmux's status-line repaints every couple of seconds and shells
+out a script. We do NOT want each repaint to open a fresh CS connection; we
+want the WS broadcast pushed once and read locally. status-collector keeps
+the WS open, applies every `agents` event to an in-memory map, and writes
+the map to a JSON file. status-bar (a tiny shell wrapper) just reads that
+file.
+
+Output file format (atomic write, replace semantics)::
+
+    {
+      "updated_at": "2026-04-30T22:00:00Z",
+      "cs_url": "http://localhost:13032",
+      "agents": {
+        "architect-A": {"status": "IDLE",  "last_heartbeat": "..."},
+        "architect-B": {"status": "BUSY",  "last_heartbeat": "..."},
+        "tester":      {"status": "OFFLINE", "last_heartbeat": "..."}
+      }
+    }
+
+Usage:
+  bin/status-collector [--cs http://host:13032] [--out /tmp/cs-agent-status.json]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import websocket  # type: ignore
+except ImportError:
+    sys.stderr.write(
+        "status-collector: pip install websocket-client\n"
+    )
+    sys.exit(1)
+
+import urllib.request
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+try:
+    from lib.ports import get_port  # noqa: E402
+except Exception:
+    def get_port(_n, fallback=None):  # type: ignore
+        return fallback if fallback is not None else 3032
+
+
+_STATE_LOCK = threading.Lock()
+_STATE: dict[str, dict] = {}
+_OUT_PATH: str = "/tmp/cs-agent-status.json"
+_CS_URL: str = ""
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_snapshot() -> None:
+    payload = {
+        "updated_at": _now_iso(),
+        "cs_url": _CS_URL,
+        "agents": _STATE,
+    }
+    # Atomic write: write to tempfile in same dir, then rename.
+    out = Path(_OUT_PATH)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".cs-status-", dir=str(out.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, separators=(",", ":"))
+        os.replace(tmp, out)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def update_agent(name: str, **fields) -> None:
+    with _STATE_LOCK:
+        rec = _STATE.setdefault(name, {})
+        rec.update(fields)
+        rec["seen_at"] = _now_iso()
+    write_snapshot()
+
+
+def hydrate_from_rest() -> None:
+    """Pull /api/agents and merge into the in-memory snapshot.
+
+    Called once at startup AND periodically (every HYDRATE_INTERVAL_SEC) on a
+    background thread. We can't rely on WS broadcasts alone because CS
+    currently fires ``agents`` channel events on FSM transitions but not on
+    plain register or heartbeat — so an agent that signs up and stays IDLE
+    would be invisible to the status panel without a periodic poll.
+    """
+    try:
+        with urllib.request.urlopen(f"{_CS_URL}/api/agents", timeout=3) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return
+    items = data if isinstance(data, list) else data.get("agents") or []
+    changed = False
+    with _STATE_LOCK:
+        for a in items:
+            name = a.get("name")
+            if not name:
+                continue
+            new = {
+                "status": a.get("status") or "OFFLINE",
+                "last_heartbeat": a.get("last_heartbeat"),
+                "role": a.get("role"),
+                "machine": a.get("location") or a.get("machine"),
+                "seen_at": _now_iso(),
+            }
+            old = _STATE.get(name) or {}
+            # Merge: keep WS-pushed fields if REST is silent on them.
+            for k, v in new.items():
+                if v is not None and old.get(k) != v:
+                    changed = True
+            _STATE.setdefault(name, {}).update({k: v for k, v in new.items() if v is not None})
+    if changed or not _STATE:
+        write_snapshot()
+
+
+HYDRATE_INTERVAL_SEC = 30
+
+
+def _periodic_hydrate(stop_event: threading.Event) -> None:
+    while not stop_event.wait(HYDRATE_INTERVAL_SEC):
+        hydrate_from_rest()
+
+
+# --- websocket handlers ----------------------------------------------------
+def on_open(_ws):
+    sys.stderr.write("[status-collector] connected\n")
+    sys.stderr.flush()
+
+
+def on_message(_ws, raw):
+    try:
+        msg = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    channel = msg.get("channel") or ""
+    mtype = msg.get("type") or ""
+    if channel != "agents" and not mtype.startswith("agent"):
+        return
+    data = msg.get("data") or {}
+    name = data.get("name") or data.get("agent")
+    if not name:
+        return
+    update_agent(
+        name,
+        status=data.get("status"),
+        last_heartbeat=data.get("last_heartbeat") or _now_iso(),
+        role=data.get("role"),
+    )
+
+
+def on_error(_ws, err):
+    sys.stderr.write(f"[status-collector] error: {err}\n")
+    sys.stderr.flush()
+
+
+def on_close(_ws, code, _reason):
+    sys.stderr.write(f"[status-collector] disconnected ({code})\n")
+    sys.stderr.flush()
+
+
+# --- main ------------------------------------------------------------------
+def main() -> int:
+    global _OUT_PATH, _CS_URL
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cs", default=os.environ.get("CS_URL", ""))
+    ap.add_argument("--out", default="/tmp/cs-agent-status.json")
+    ap.add_argument("--name", default="status-collector")
+    args = ap.parse_args()
+
+    _OUT_PATH = args.out
+    _CS_URL = args.cs or f"http://localhost:{get_port('consciousness-server', 3032)}"
+
+    hydrate_from_rest()
+    write_snapshot()
+
+    # Periodic re-hydrate covers register/heartbeat events that CS does not
+    # broadcast on the ``agents`` channel.
+    stop_hydrate = threading.Event()
+    threading.Thread(
+        target=_periodic_hydrate, args=(stop_hydrate,), daemon=True
+    ).start()
+
+    ws_url = _CS_URL.replace("https://", "wss://").replace("http://", "ws://")
+    ws_url = f"{ws_url.rstrip('/')}/{args.name}"
+
+    backoff = 1
+    while True:
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+        signal.signal(signal.SIGINT, lambda *_: ws.close())
+        try:
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[status-collector] crash: {e}\n")
+
+        if ws.sock is None and not ws.keep_running:
+            return 0
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 30)
+        sys.stderr.write(f"[status-collector] reconnecting in {backoff}s…\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

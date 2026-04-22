@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# status-bar — render a one-line summary of all agent FSM states.
+#
+# Reads /tmp/cs-agent-status.json (maintained live by bin/status-collector).
+# Use as the right-hand status segment in tmux:
+#
+#   set -g status-interval 2
+#   set -g status-right "#(/path/to/bin/status-bar)"
+#
+# Output looks like:
+#   architect-A:🟢IDLE  architect-B:🟡BUSY  tester:⚫OFFLINE  decider:🟢IDLE
+#
+# Glyphs:
+#   🟢 IDLE / STARTING
+#   🟡 BUSY
+#   🔴 BLOCKED / ERROR
+#   ⚫ OFFLINE / unknown
+#
+# Falls back to a "(no status-collector)" message if the snapshot file is
+# missing or older than 30 seconds — that surfaces a dead collector
+# immediately instead of silently showing stale state.
+
+set -u
+
+FILE="${CS_STATUS_FILE:-/tmp/cs-agent-status.json}"
+STALE_AFTER="${CS_STATUS_STALE_SEC:-30}"
+NOW=$(date +%s)
+
+if [ ! -f "$FILE" ]; then
+  printf '(no status-collector)'
+  exit 0
+fi
+
+mtime=$(stat -c %Y "$FILE" 2>/dev/null || stat -f %m "$FILE" 2>/dev/null || echo 0)
+age=$((NOW - mtime))
+if [ "$age" -gt "$STALE_AFTER" ]; then
+  printf '(status %ds old)' "$age"
+  exit 0
+fi
+
+# Render. Use jq if available for safety, fall back to a quick Python one-liner
+# (Python ships everywhere we run anyway).
+if command -v jq >/dev/null 2>&1; then
+  jq -r '
+    .agents
+    | to_entries
+    | sort_by(.key)
+    | map(
+        .key as $n
+        | (.value.status // "OFFLINE") as $s
+        | (
+            if   ($s == "IDLE" or $s == "STARTING") then "🟢"
+            elif ($s == "BUSY")                     then "🟡"
+            elif ($s == "BLOCKED" or $s == "ERROR") then "🔴"
+            else                                          "⚫"
+            end
+          ) as $g
+        | "\($n):\($g)\($s)"
+      )
+    | join("  ")
+  ' "$FILE"
+else
+  python3 - "$FILE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+agents = data.get("agents") or {}
+def glyph(s):
+    s = (s or "OFFLINE").upper()
+    if s in ("IDLE", "STARTING"): return "🟢"
+    if s == "BUSY":               return "🟡"
+    if s in ("BLOCKED", "ERROR"): return "🔴"
+    return "⚫"
+parts = []
+for name in sorted(agents):
+    s = (agents[name] or {}).get("status") or "OFFLINE"
+    parts.append(f"{name}:{glyph(s)}{s}")
+print("  ".join(parts), end="")
+PY
+fi

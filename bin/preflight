@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# preflight — check that the host has everything the ecosystem needs
+# before `docker compose up`.
+#
+# Usage:  bin/preflight
+#
+# Exit 0  — all checks passed, safe to bring the ecosystem up. May
+#           still print WARN lines for non-blocking issues (e.g. a
+#           default port already in use on the host — fixable by
+#           editing ports.yaml).
+# Exit 1  — something is missing or unfixable here; the script prints
+#           exactly what and how to fix it, then stops.
+#
+# This script only reads. It does not install anything, it does not
+# modify state. You run it, you read what it says, you decide.
+
+set -u
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PORTS_YAML="$REPO_ROOT/ports.yaml"
+
+RED=$'\033[0;31m'
+YEL=$'\033[0;33m'
+GRN=$'\033[0;32m'
+RST=$'\033[0m'
+
+WARN_COUNT=0
+FAILED=0
+
+ok()    { printf '%s  OK%s     %s\n' "$GRN" "$RST" "$1"; }
+warn()  { printf '%s  WARN%s   %s\n' "$YEL" "$RST" "$1"; WARN_COUNT=$((WARN_COUNT + 1)); }
+fail()  { printf '%s  FAIL%s   %s\n'  "$RED" "$RST" "$1"; FAILED=1; }
+fix()   { printf '         %sfix:%s %s\n' "$YEL" "$RST" "$1"; }
+hint()  { printf '         %shint:%s %s\n' "$YEL" "$RST" "$1"; }
+
+echo 'ecosystem preflight'
+echo '-------------------'
+
+# --- docker --------------------------------------------------------
+if command -v docker >/dev/null 2>&1; then
+  if docker info >/dev/null 2>&1; then
+    ok "docker daemon reachable"
+  else
+    fail "docker installed but daemon not reachable"
+    fix "start the daemon:  sudo systemctl start docker   (Linux)"
+    fix "                   open Docker Desktop           (Mac/Windows)"
+  fi
+else
+  fail "docker not installed"
+  fix "install Docker Engine: https://docs.docker.com/engine/install/"
+fi
+
+# --- docker compose v2 ---------------------------------------------
+if docker compose version >/dev/null 2>&1; then
+  ok "docker compose v2 present"
+else
+  fail "docker compose v2 not available"
+  fix "install Compose plugin: https://docs.docker.com/compose/install/"
+fi
+
+# --- ollama on host ------------------------------------------------
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+EMBED_MODEL="${EMBEDDING_MODEL:-nomic-embed-text}"
+
+if curl -sf --max-time 3 "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+  ok "ollama reachable at ${OLLAMA_URL}"
+
+  if curl -sf --max-time 3 "${OLLAMA_URL}/api/tags" \
+       | grep -q "\"${EMBED_MODEL}"; then
+    ok "embedding model ${EMBED_MODEL} is pulled"
+  else
+    fail "embedding model ${EMBED_MODEL} is not pulled"
+    fix "ollama pull ${EMBED_MODEL}"
+  fi
+else
+  fail "ollama not running at ${OLLAMA_URL}"
+  fix "install:  curl -fsSL https://ollama.com/install.sh | sh"
+  fix "serve:    ollama serve       (or open Ollama.app on Mac)"
+  fix "model:    ollama pull ${EMBED_MODEL}"
+fi
+
+# --- ports free (read from ports.yaml) ----------------------------
+# We check every port listed in ports.yaml that the ecosystem will
+# try to bind on the host. Externally-managed services (ollama,
+# postgres) are not host-bound by our compose, skip them here.
+PORT_WARNS=0
+if [ -f "$PORTS_YAML" ]; then
+  while IFS=' ' read -r pname pnum; do
+    case "$pname" in
+      ollama|postgres) continue ;;
+    esac
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$pnum$"; then
+      warn "port $pnum ($pname) already bound on host"
+      PORT_WARNS=$((PORT_WARNS + 1))
+    fi
+  done < <(awk '
+    BEGIN { in_ports = 0 }
+    { sub(/#.*$/, "") }
+    /^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*$/ {
+      name = $1; sub(/:$/, "", name)
+      in_ports = (name == "ports")
+      next
+    }
+    in_ports && /^[[:space:]]+[A-Za-z][A-Za-z0-9_-]*:[[:space:]]+[0-9]+/ {
+      name = $1; sub(/:$/, "", name)
+      port = $2
+      printf "%s %s\n", name, port
+    }
+  ' "$PORTS_YAML")
+
+  if [ $PORT_WARNS -gt 0 ]; then
+    hint "the BuildOnAI ecosystem reserves ports 3030-3049 by default."
+    hint "If a default is in use on your host, edit ports.yaml — every"
+    hint "entry shifts together (e.g. add 10000 to each value) — then"
+    hint "run bin/sync-ports and re-run bin/preflight."
+  fi
+else
+  warn "ports.yaml not found at $PORTS_YAML — skipping port-collision check"
+fi
+
+# --- final summary -------------------------------------------------
+echo '-------------------'
+if [ $FAILED -ne 0 ]; then
+  printf '%ssome checks failed — fix the items above, then re-run bin/preflight%s\n' "$RED" "$RST"
+  exit 1
+fi
+if [ $WARN_COUNT -gt 0 ]; then
+  printf '%spassed with %d warning(s) — review above before running compose%s\n' "$YEL" "$WARN_COUNT" "$RST"
+  exit 0
+fi
+printf '%sall checks passed — safe to run: docker compose up -d%s\n' "$GRN" "$RST"
+exit 0

@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""chat-panel — live subscriber to the Consciousness Server chat broadcast.
+
+Usage:
+  bin/chat-panel [--cs http://host:13032] [--name <panel-name>] [--filter <agent>]
+
+Connects via WebSocket, subscribes to the 'chat' channel, and prints every
+incoming message as it lands. No polling. Used as the bottom pane in each
+agent's tmux window so the operator (and the agent) sees the live conversation.
+
+Requires: pip install websocket-client (or rely on the bundled venv).
+
+Filter mode:
+  --filter <agent>  show only chat where the message is FROM this agent
+                    or addressed @<agent> / @all. Useful if a panel
+                    should be the "agent's inbox" view.
+
+Exit codes: 0 normal exit (Ctrl-C), 1 connection failure, 2 bad arg.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+# --- import websocket-client; install hint if missing -----------------------
+try:
+    import websocket  # type: ignore
+except ImportError:
+    sys.stderr.write(
+        "chat-panel: websocket-client not installed.\n"
+        "  pip install websocket-client\n"
+        "or run with the bundled venv:\n"
+        "  python3 -m venv .venv && .venv/bin/pip install websocket-client && "
+        ".venv/bin/python bin/chat-panel ...\n"
+    )
+    sys.exit(1)
+
+
+# --- import ports loader from lib/ -----------------------------------------
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+try:
+    from lib.ports import get_port  # noqa: E402
+except Exception:
+    def get_port(_name, fallback=None):  # type: ignore
+        return fallback if fallback is not None else 3032
+
+
+# --- ANSI colours -----------------------------------------------------------
+RESET = "\033[0m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+COLOURS = [
+    "\033[38;5;39m",   # blue
+    "\033[38;5;82m",   # green
+    "\033[38;5;208m",  # orange
+    "\033[38;5;201m",  # magenta
+    "\033[38;5;226m",  # yellow
+    "\033[38;5;51m",   # cyan
+    "\033[38;5;199m",  # pink
+    "\033[38;5;156m",  # mint
+]
+_agent_colour: dict[str, str] = {}
+
+
+def colour_for(agent: str) -> str:
+    if agent not in _agent_colour:
+        _agent_colour[agent] = COLOURS[len(_agent_colour) % len(COLOURS)]
+    return _agent_colour[agent]
+
+
+def fmt_ts(iso_ts: str | None) -> str:
+    if not iso_ts:
+        return datetime.now().strftime("%H:%M:%S")
+    try:
+        return datetime.fromisoformat(iso_ts.replace("Z", "+00:00")).strftime("%H:%M:%S")
+    except ValueError:
+        return iso_ts[11:19] if len(iso_ts) >= 19 else iso_ts
+
+
+# --- core printing ---------------------------------------------------------
+def print_chat(msg: dict, only_for: str | None = None) -> None:
+    data = msg.get("data") or {}
+    sender = str(data.get("from") or msg.get("from") or "?")
+    to = str(data.get("to") or msg.get("to") or "@all")
+    content = data.get("content") or msg.get("content") or ""
+    ts = fmt_ts(data.get("timestamp") or msg.get("timestamp"))
+
+    if only_for:
+        addressed = (to == only_for) or to == "@all" or f"@{only_for}" in content
+        if sender != only_for and not addressed:
+            return
+
+    c = colour_for(sender)
+    arrow = f" → {to}" if to and to != "@all" else ""
+    print(f"{DIM}{ts}{RESET}  {c}{BOLD}{sender}{RESET}{DIM}{arrow}{RESET}  {content}",
+          flush=True)
+
+
+def print_status_change(msg: dict) -> None:
+    data = msg.get("data") or {}
+    agent = data.get("agent") or data.get("name") or "?"
+    status = data.get("status") or msg.get("type", "")
+    c = colour_for(str(agent))
+    print(f"{DIM}{fmt_ts(None)}{RESET}  {c}{agent}{RESET}{DIM} → {status}{RESET}",
+          flush=True)
+
+
+# --- websocket handlers ----------------------------------------------------
+def on_open(ws):  # noqa: ARG001
+    sys.stderr.write(f"{DIM}[chat-panel] connected{RESET}\n")
+    sys.stderr.flush()
+
+
+def on_message(ws, raw):  # noqa: ARG001
+    try:
+        msg = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    only_for = ws._cs_filter  # type: ignore[attr-defined]
+    channel = msg.get("channel") or ""
+    mtype = msg.get("type") or ""
+    if channel == "chat" or mtype.startswith("chat"):
+        print_chat(msg, only_for=only_for)
+    elif ws._cs_show_status and (channel == "agents" or mtype.startswith("agent")):  # type: ignore[attr-defined]
+        print_status_change(msg)
+
+
+def on_error(ws, err):  # noqa: ARG001
+    sys.stderr.write(f"{DIM}[chat-panel] error: {err}{RESET}\n")
+    sys.stderr.flush()
+
+
+def on_close(ws, code, reason):  # noqa: ARG001
+    sys.stderr.write(f"{DIM}[chat-panel] disconnected ({code}){RESET}\n")
+    sys.stderr.flush()
+
+
+# --- main -----------------------------------------------------------------
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--cs", default=os.environ.get("CS_URL", ""),
+                    help="CS base URL, e.g. http://localhost:13032 "
+                         "(default: $CS_URL or http://localhost:<ports.yaml port>)")
+    ap.add_argument("--name", default=os.environ.get("CHAT_PANEL_NAME", "chat-panel"),
+                    help="WebSocket client name (visible in CS logs)")
+    ap.add_argument("--filter", dest="filter_agent", default=None,
+                    help="Show only chat from/to this agent (and @all broadcasts)")
+    ap.add_argument("--no-status", action="store_true",
+                    help="Do not print agent status changes (default: also show status events)")
+    args = ap.parse_args()
+
+    cs_url = args.cs or f"http://localhost:{get_port('consciousness-server', 3032)}"
+    ws_url = cs_url.replace("https://", "wss://").replace("http://", "ws://")
+    ws_url = f"{ws_url.rstrip('/')}/{args.name}"
+
+    print(f"{BOLD}=== chat panel ==={RESET}  {DIM}target: {cs_url}, name: {args.name}"
+          + (f", filter: {args.filter_agent}" if args.filter_agent else "") + RESET,
+          flush=True)
+
+    # Reconnect loop — CS restart should not kill the panel.
+    backoff = 1
+    while True:
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+        ws._cs_filter = args.filter_agent  # type: ignore[attr-defined]
+        ws._cs_show_status = not args.no_status  # type: ignore[attr-defined]
+
+        def _sigint(_sig, _frm, _ws=ws):
+            _ws.close()
+
+        signal.signal(signal.SIGINT, _sigint)
+
+        try:
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"{DIM}[chat-panel] crash: {e}{RESET}\n")
+
+        # Exit on clean Ctrl-C; otherwise reconnect.
+        if ws.sock is None and not ws.keep_running:
+            return 0
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 30)
+        sys.stderr.write(f"{DIM}[chat-panel] reconnecting in {backoff}s…{RESET}\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

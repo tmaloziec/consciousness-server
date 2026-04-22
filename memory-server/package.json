@@ -1,0 +1,15 @@
+{
+  "name": "memory-server",
+  "version": "0.1.0",
+  "description": "Stage 1 ingest service for the BuildOnAI Mesh roadmap — Postgres+pgvector + chunked embeddings + audit. Substrate for later graph + density work.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "migrate": "node db/migrate.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.3"
+  },
+  "license": "AGPL-3.0-only"
+}

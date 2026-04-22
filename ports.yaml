@@ -1,0 +1,51 @@
+# =============================================================================
+# PORT REGISTRY - Single Source of Truth
+# =============================================================================
+# Edit this file to retune the whole port palette in one place.
+#
+# Loaders: lib/ports.js (Node), lib/ports.py (Python). Synced into each block
+# at build time via bin/sync-middleware. Each block's server resolves its
+# port in this order (highest wins):
+#
+#   1. process.env.PORT  (the canonical "what THIS process listens on" var)
+#   2. process.env.PORT_<NAME> (e.g. PORT_KEY_SERVER=13040)
+#   3. ports.yaml (this file)
+#   4. hardcoded fallback in the server source
+#
+# Why a registry: users may have 3032/3037/etc. taken on their host. Editing
+# this file once retunes every block — no code changes, no env juggling, no
+# docker-compose surgery. Set CS_PORTS_FILE to point loaders at a different
+# yaml if you want per-deployment palettes side by side.
+#
+# Format is fixed and minimal. Loaders parse with regex (no PyYAML/js-yaml
+# dependency); only `<name>: <integer>` lines under the top-level `ports:`
+# key are read.
+# =============================================================================
+
+ports:
+  # Core Infrastructure (active)
+  consciousness-server: 3032
+  semantic-search: 3037
+  machines-server: 3038
+  key-server: 3040
+  test-runner: 3041
+  git-workflow: 3042
+  memory-server: 3045
+
+  # External Services
+  redis: 6379
+  postgres: 5432
+  ollama: 11434
+
+active_blocks:
+  - consciousness-server
+  - semantic-search
+  - machines-server
+  - key-server
+  - test-runner
+  - git-workflow
+  - memory-server
+
+# Notes:
+# - Full architecture: ./ARCHITECTURE.md
+# - Health checks: bin/test-blocks.sh

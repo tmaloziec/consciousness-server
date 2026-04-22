@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# sync-middleware — copy lib/ masters into each block that opts in.
+#
+# Blocks opt in by creating `<block>/middleware/.sync-target`. The
+# marker's sole content is the filename to pull from lib/, e.g.:
+#
+#     $ cat test-runner/middleware/.sync-target
+#     verify_signed.py
+#
+# On sync, this script copies `lib/<target>` to
+# `<block>/middleware/<target>`. Master + copies live in Git; CI runs
+# this script with `--check` and fails the build if any copy drifted.
+#
+# Usage:
+#   bin/sync-middleware           # copy master → every target
+#   bin/sync-middleware --check   # diff each copy vs master, exit 1 on drift
+#   bin/sync-middleware --list    # print (block, target, hash) matrix
+#
+# No hardcoded block list — the script walks the tree for markers. No hardcoded block list anywhere.
+
+set -u
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LIB_DIR="$ROOT/lib"
+
+MODE="sync"
+case "${1-}" in
+  "")        MODE="sync" ;;
+  --check)   MODE="check" ;;
+  --list)    MODE="list" ;;
+  -h|--help)
+    sed -n '2,20p' "$0"
+    exit 0
+    ;;
+  *)
+    printf 'sync-middleware: unknown argument: %s\n' "$1" >&2
+    exit 2
+    ;;
+esac
+
+# Find every marker. Exclude training-data, node_modules, git, .sandbox.
+mapfile -t MARKERS < <(
+  find "$ROOT" \
+    \( -path "$ROOT/training-data" -o \
+       -path "$ROOT/.git" -o \
+       -path "$ROOT/deploy/volumes" -o \
+       -name node_modules \) -prune \
+    -o -name .sync-target -print \
+    | sort
+)
+
+if [ "${#MARKERS[@]}" -eq 0 ]; then
+  printf 'sync-middleware: no .sync-target markers found under %s\n' "$ROOT"
+  exit 0
+fi
+
+hash_file() {
+  # portable sha256 of a file; empty output if file missing.
+  if [ -f "$1" ]; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    printf '(missing)'
+  fi
+}
+
+drift=0
+synced=0
+
+for marker in "${MARKERS[@]}"; do
+  # Each non-empty, non-comment line in the marker is one filename to sync from
+  # lib/. Single-line markers (the original format) keep working unchanged.
+  targets=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed="$(printf '%s' "$line" | tr -d '[:space:]')"
+    case "$trimmed" in
+      ''|'#'*) continue ;;
+    esac
+    targets+=("$trimmed")
+  done < "$marker"
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    printf '  !! %s has empty target — skip\n' "${marker#$ROOT/}" >&2
+    drift=1
+    continue
+  fi
+
+  dest_dir="$(dirname "$marker")"
+  block="${dest_dir#$ROOT/}"
+  block="${block%/middleware}"
+
+  for target in "${targets[@]}"; do
+    master="$LIB_DIR/$target"
+    dest="$dest_dir/$target"
+
+    if [ ! -f "$master" ]; then
+      printf '  !! %s wants lib/%s but master does not exist\n' "$block" "$target" >&2
+      drift=1
+      continue
+    fi
+
+    master_hash="$(hash_file "$master")"
+    dest_hash="$(hash_file "$dest")"
+
+    case "$MODE" in
+      sync)
+        if [ "$master_hash" != "$dest_hash" ]; then
+          cp "$master" "$dest"
+          printf '  ✓ synced  %-28s ← lib/%s\n' "$block" "$target"
+          synced=$((synced + 1))
+        else
+          printf '  · up-to-date  %-24s (lib/%s)\n' "$block" "$target"
+        fi
+        ;;
+
+      check)
+        if [ "$master_hash" != "$dest_hash" ]; then
+          printf '  ✗ DRIFT  %-28s (hash %s ≠ master %s)\n' \
+            "$block" "${dest_hash:0:8}" "${master_hash:0:8}" >&2
+          drift=1
+        fi
+        ;;
+
+      list)
+        printf '  %-28s  lib/%-20s  %s\n' "$block" "$target" "${master_hash:0:12}"
+        ;;
+    esac
+  done
+done
+
+case "$MODE" in
+  sync)
+    printf 'sync-middleware: %d target(s) synced, %d marker(s) inspected\n' \
+      "$synced" "${#MARKERS[@]}"
+    exit 0
+    ;;
+  check)
+    if [ "$drift" -eq 0 ]; then
+      printf 'sync-middleware --check: all %d copies match master\n' "${#MARKERS[@]}"
+      exit 0
+    fi
+    printf 'sync-middleware --check: drift detected — run bin/sync-middleware to fix\n' >&2
+    exit 1
+    ;;
+  list)
+    exit 0
+    ;;
+esac

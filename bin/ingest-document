@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# ingest-document — push a file at memory-server's POST /api/sources/ingest.
+#
+# Usage:
+#   bin/ingest-document <path> [--type TYPE] [--memory URL] [--by AGENT]
+#                       [--lang LANG] [--metadata-json STRING]
+#
+# Defaults:
+#   --type     guessed from file extension (.pdf→pdf, .md→txt, fallback 'txt')
+#   --memory   $MEMORY_URL or http://localhost:<ports.yaml memory-server>
+#   --by       $USER@$(hostname) — gets logged into ingest_audit
+#   --metadata empty JSON object
+#
+# The file is read as UTF-8 and shipped inline. Binary formats (PDF, DOCX)
+# need their own extractor first; this tool is for ingest of already-text
+# content. PDF extraction belongs to a later iteration.
+
+set -u
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Resolve memory-server port from ports.yaml unless overridden.
+default_port() {
+  awk '/^[[:space:]]+memory-server:/ {print $2; exit}' \
+    "$REPO_ROOT/ports.yaml" 2>/dev/null || echo 3045
+}
+MEMORY_URL="${MEMORY_URL:-http://localhost:$(default_port)}"
+INGESTED_BY="${USER:-unknown}@$(hostname)"
+SOURCE_TYPE=""
+LANGUAGE=""
+METADATA="{}"
+FILE=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --type)         SOURCE_TYPE="$2"; shift 2 ;;
+    --memory)       MEMORY_URL="$2";  shift 2 ;;
+    --by)           INGESTED_BY="$2"; shift 2 ;;
+    --lang)         LANGUAGE="$2";    shift 2 ;;
+    --metadata-json) METADATA="$2";   shift 2 ;;
+    -h|--help)
+      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      exit 0 ;;
+    *)
+      if [ -z "$FILE" ]; then FILE="$1"; shift
+      else echo "ingest-document: unexpected arg: $1" >&2; exit 2; fi ;;
+  esac
+done
+
+if [ -z "$FILE" ] || [ ! -r "$FILE" ]; then
+  echo "ingest-document: file not readable: $FILE" >&2
+  exit 2
+fi
+
+if [ -z "$SOURCE_TYPE" ]; then
+  case "$FILE" in
+    *.pdf)              SOURCE_TYPE="pdf" ;;
+    *.docx|*.doc)       SOURCE_TYPE="docx" ;;
+    *.eml|*.msg)        SOURCE_TYPE="email" ;;
+    *.md|*.txt|*.rst)   SOURCE_TYPE="txt" ;;
+    *.html|*.htm)       SOURCE_TYPE="web_page" ;;
+    *.json)             SOURCE_TYPE="json" ;;
+    *)                  SOURCE_TYPE="txt" ;;
+  esac
+fi
+
+# Health probe — fail fast with a useful message if memory-server is down,
+# so the operator does not get a generic curl error and start guessing.
+if ! curl -sfo /dev/null "$MEMORY_URL/health"; then
+  echo "ingest-document: memory-server not reachable at $MEMORY_URL" >&2
+  echo "  start it with:  cd deploy && docker compose --profile mesh up -d" >&2
+  exit 3
+fi
+
+# Build JSON payload. We base64-encode the file content because shell
+# quoting around large arbitrary text is unreliable.
+CONTENT_B64=$(base64 -w 0 "$FILE")
+PAYLOAD=$(
+  python3 - "$FILE" "$SOURCE_TYPE" "$INGESTED_BY" "$LANGUAGE" "$METADATA" "$CONTENT_B64" <<'PY'
+import json, sys
+fp, stype, by, lang, meta_str, b64 = sys.argv[1:7]
+try:
+    meta = json.loads(meta_str) if meta_str else {}
+except Exception:
+    meta = {}
+out = {
+    "file_path": fp,
+    "source_type": stype,
+    "ingested_by": by,
+    "metadata": meta,
+    "content_b64": b64,
+}
+if lang:
+    out["language"] = lang
+print(json.dumps(out))
+PY
+)
+
+curl -sS -X POST "$MEMORY_URL/api/sources/ingest" \
+  -H 'Content-Type: application/json' \
+  -d "$PAYLOAD" \
+  | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=2, ensure_ascii=False))'

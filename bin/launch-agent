@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# launch-agent — start a Claude Code instance with a specific role character.
+#
+# Claude Code natively merges two CLAUDE.md files at startup:
+#   $HOME/.claude/CLAUDE.md    — user-level (the agent's character)
+#   $PWD/CLAUDE.md             — project-level (what the codebase is about)
+#
+# This script gives each role its own $HOME so multiple instances with
+# different characters can run at the same time, all pointing at the
+# same project directory.
+#
+# Layout after first launch:
+#   $HOME/.cs-agents/<role>/.claude/CLAUDE.md
+#       → symlink to agents/<role>.md
+#
+# Usage:
+#   launch-agent <role> [project-path]
+#     role          Name of a file under agents/<role>.md
+#     project-path  Directory where Claude Code runs (default: current working dir)
+#
+# Env:
+#   CS_URL        consciousness-server base URL (default: http://127.0.0.1:3032)
+#   CLAUDE_BIN    path to claude CLI (default: claude from PATH)
+#
+# Side effects: creates $HOME/.cs-agents/<role>/ on first run. Calls
+# POST /api/agents/register if CS is reachable (graceful fail).
+
+set -eu
+
+usage() {
+  cat >&2 <<EOF
+Usage: launch-agent <role> [project-path]
+  role          A file under agents/<role>.md
+  project-path  Where Claude Code runs (default: \$PWD)
+
+Environment:
+  CS_URL        consciousness-server URL (default: http://127.0.0.1:3032)
+  CLAUDE_BIN    claude CLI path (default: \`claude\` in PATH)
+EOF
+  exit 2
+}
+
+[ $# -lt 1 ] && usage
+ROLE="$1"
+PROJECT_DIR="${2:-$PWD}"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ECOSYSTEM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REGISTRY_DIR="$ECOSYSTEM_ROOT/agents"
+ROLE_FILE="$REGISTRY_DIR/$ROLE.md"
+
+# --- Validate role --------------------------------------------------------
+if [ ! -f "$ROLE_FILE" ]; then
+  echo "launch-agent: role '$ROLE' not found at $ROLE_FILE" >&2
+  echo "  available roles:" >&2
+  if [ -d "$REGISTRY_DIR" ]; then
+    for f in "$REGISTRY_DIR"/*.md; do
+      [ -f "$f" ] && printf '    %s\n' "$(basename "$f" .md)" >&2
+    done
+  fi
+  exit 1
+fi
+
+# --- Validate project directory ------------------------------------------
+if [ ! -d "$PROJECT_DIR" ]; then
+  echo "launch-agent: project directory '$PROJECT_DIR' does not exist" >&2
+  exit 1
+fi
+
+# --- Prepare isolated HOME for this role ---------------------------------
+AGENT_HOME="$HOME/.cs-agents/$ROLE"
+mkdir -p "$AGENT_HOME/.claude"
+
+# Point user-level CLAUDE.md at the registry file. Symlink, not copy —
+# so edits to the role template flow into every future session.
+LINK="$AGENT_HOME/.claude/CLAUDE.md"
+ln -sf "$ROLE_FILE" "$LINK"
+
+# --- Optional: announce to consciousness-server --------------------------
+# Fails silently if CS is not running — launch-agent must work offline.
+CS_URL="${CS_URL:-http://127.0.0.1:3032}"
+if curl -sf --max-time 2 "$CS_URL/health" >/dev/null 2>&1; then
+  curl -sf --max-time 2 -X POST "$CS_URL/api/agents/register" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"$ROLE\",\"type\":\"WORKER\",\"location\":\"$(hostname)\"}" \
+    >/dev/null 2>&1 || true
+fi
+
+# --- Resolve claude CLI --------------------------------------------------
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+  echo "launch-agent: '$CLAUDE_BIN' not found in PATH" >&2
+  echo "  install Claude Code first, or set CLAUDE_BIN=/path/to/claude" >&2
+  exit 1
+fi
+
+# --- Launch --------------------------------------------------------------
+cat <<EOF
+→ Role:       $ROLE
+→ Agent HOME: $AGENT_HOME
+→ Project:    $PROJECT_DIR
+→ Character:  $ROLE_FILE
+→ CS URL:     $CS_URL
+
+EOF
+
+cd "$PROJECT_DIR" && HOME="$AGENT_HOME" exec "$CLAUDE_BIN" "$@"

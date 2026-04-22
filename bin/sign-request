@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# sign-request — produce the four headers needed to call a signed endpoint.
+#
+# See docs/SIGNING-PROTOCOL.md. Given an agent id, an HTTP method, a request
+# path, and a body (string or @file), this prints the four X-* headers
+# that the key-server expects when the target block delegates to POST
+# /api/verify:
+#
+#   X-Agent-Id: <agent_id>
+#   X-Timestamp: <ISO-8601 UTC>
+#   X-Nonce: <32 hex>
+#   X-Signature: <base64 ed25519 over canonical message>
+#
+# Usage:
+#   sign-request <agent> <method> <path> [body | @file]
+#
+# Examples:
+#   sign-request agent1 GET  /api/notes/recent
+#   sign-request agent1 POST /api/notes '{"title":"hi"}'
+#   sign-request agent1 POST /api/notes @/tmp/payload.json
+#
+# Env:
+#   AGENT_PRIV_KEY  path to the agent's OpenSSH ed25519 private key
+#                   (default: ~/.ssh/ecosystem-<AGENT>)
+#   KEY_SERVER_NODE_MODULES  path to node_modules holding `sshpk`
+#                   (default: $ECOSYSTEM_ROOT/key-server/node_modules)
+#
+# Side effects: none. Does not hit the network. Just prints headers.
+
+set -u
+
+if [ $# -lt 3 ]; then
+  echo "usage: sign-request <agent> <method> <path> [body | @file]" >&2
+  exit 2
+fi
+
+AGENT="$1"
+METHOD="$2"
+REQ_PATH="$3"
+BODY_ARG="${4-}"
+
+# Resolve private key file.
+PRIV_KEY="${AGENT_PRIV_KEY:-$HOME/.ssh/ecosystem-$AGENT}"
+if [ ! -f "$PRIV_KEY" ]; then
+  echo "sign-request: private key not found: $PRIV_KEY" >&2
+  echo "  set AGENT_PRIV_KEY=/path/to/key or bootstrap per keys/agents/README.md" >&2
+  exit 1
+fi
+
+# Resolve node_modules (for sshpk — required by the signer because
+# Node's crypto.createPrivateKey rejects OpenSSH ed25519 private keys).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEFAULT_NM="$(cd "$SCRIPT_DIR/.." && pwd)/key-server/node_modules"
+NM="${KEY_SERVER_NODE_MODULES:-$DEFAULT_NM}"
+if [ ! -d "$NM/sshpk" ]; then
+  echo "sign-request: sshpk not found in $NM" >&2
+  echo "  run: (cd key-server && npm install)" >&2
+  exit 1
+fi
+
+# Resolve body — inline string or @file.
+if [ -z "$BODY_ARG" ]; then
+  BODY=""
+elif [ "${BODY_ARG:0:1}" = "@" ]; then
+  BODY_FILE="${BODY_ARG:1}"
+  if [ ! -f "$BODY_FILE" ]; then
+    echo "sign-request: body file not found: $BODY_FILE" >&2
+    exit 1
+  fi
+  BODY="$(cat "$BODY_FILE")"
+else
+  BODY="$BODY_ARG"
+fi
+
+TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+NONCE="$(openssl rand -hex 16)"
+BODY_SHA="$(printf "%s" "$BODY" | sha256sum | awk '{print $1}')"
+
+METHOD_UC="$(echo "$METHOD" | tr '[:lower:]' '[:upper:]')"
+CANONICAL="$(printf "%s\n%s\n%s\n%s\n%s" \
+  "$METHOD_UC" "$REQ_PATH" "$TS" "$NONCE" "$BODY_SHA")"
+
+SIG="$(NODE_PATH="$NM" node -e '
+  const sshpk = require("sshpk");
+  const crypto = require("crypto");
+  const fs = require("fs");
+  const priv = sshpk.parsePrivateKey(fs.readFileSync(process.argv[1]), "ssh");
+  const key = crypto.createPrivateKey(priv.toString("pkcs8"));
+  const msg = Buffer.from(process.argv[2], "utf8");
+  process.stdout.write(crypto.sign(null, msg, key).toString("base64"));
+' "$PRIV_KEY" "$CANONICAL")"
+
+printf "X-Agent-Id: %s\n"  "$AGENT"
+printf "X-Timestamp: %s\n" "$TS"
+printf "X-Nonce: %s\n"     "$NONCE"
+printf "X-Signature: %s\n" "$SIG"

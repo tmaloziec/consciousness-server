@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# launch-debate-demo — orchestrate the four-agent architectural debate scenario.
+#
+# Pre-requisites:
+#   - consciousness-server running (port from ports.yaml; CS_URL env overrides)
+#   - Ollama with a tool-calling model pulled (gemma4:e4b or similar)
+#   - Cortex repo available (CORTEX_DIR env, default ../cortex relative to this repo)
+#   - python3 with websocket-client installed (pip install websocket-client)
+#
+# What happens:
+#   1. Starts bin/status-collector in the background (one daemon, all panels read its file).
+#   2. Creates four tmux sessions, one per agent. Each session has:
+#        pane 0 — the agent process
+#        pane 1 — chat-panel filtered to messages from/to this agent
+#        status bar (bottom) — global agent FSM states from status-collector
+#   3. Creates a fifth "operator" session with the unfiltered chat-panel
+#      so the human moderator can drop the seed task and watch everything live.
+#
+# Roles in this demo-
+#   architect-postgres  Cortex agent profile arguing for Postgres
+#   architect-redis     Cortex agent profile arguing for Redis
+#   tester              Cortex agent that writes & runs benchmarks
+#   decider             Claude Code (Max session) — synthesises, writes RFC
+#
+# Usage:
+#   bin/launch-debate-demo                # start everything
+#   bin/launch-debate-demo --tear-down    # kill all five sessions + collector
+#   bin/launch-debate-demo --attach <name>  # attach to one (architect-postgres, ...)
+#
+# Tearing down only kills sessions named ``demo-<role>`` and the demo
+# collector — your other tmux work is not touched.
+
+set -u
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CORTEX_DIR="${CORTEX_DIR:-$(cd "$REPO_ROOT/../cortex" 2>/dev/null && pwd || echo "")}"
+CS_URL="${CS_URL:-http://localhost:$(awk '/^[[:space:]]+consciousness-server:/ {print $2; exit}' "$REPO_ROOT/ports.yaml" 2>/dev/null || echo 3032)}"
+STATUS_FILE="${CS_STATUS_FILE:-/tmp/cs-agent-status.json}"
+COLLECTOR_PID_FILE="/tmp/cs-status-collector.pid"
+
+# Three agents on screen (operator drives from a fourth window — their own
+# terminal, not a tmux session managed by us). Each entry is
+# "<window-num>:<agent-name>:<profile.md>". Window number drives the OBS-
+# visible terminal title so the operator can identify panels in the source
+# picker (Window Capture lists by title).
+ROLES_DEF=(
+  "1:cortex-postgres:agents/architect-postgres.md"
+  "2:cortex-redis:agents/architect-redis.md"
+  "3:codex:agents/codex.md"
+)
+ROLES=()
+for entry in "${ROLES_DEF[@]}"; do
+  IFS=: read -r _ role _ <<<"$entry"
+  ROLES+=("$role")
+done
+
+usage() {
+  sed -n '2,32p' "$0" | sed 's/^# \?//'
+  exit 2
+}
+
+teardown() {
+  echo "tearing down demo…"
+  # Kill anything starting with demo- to also catch sessions from previous
+  # incarnations of the launcher (architect-postgres, tester, decider, ...).
+  for s in $(tmux ls 2>/dev/null | awk -F: '/^demo-/{print $1}'); do
+    tmux kill-session -t "$s" && echo "  ✓ killed $s"
+  done
+  if [ -f "$COLLECTOR_PID_FILE" ]; then
+    pid=$(cat "$COLLECTOR_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" && echo "  ✓ stopped status-collector (pid $pid)"
+    fi
+    rm -f "$COLLECTOR_PID_FILE"
+  fi
+  rm -f "$STATUS_FILE"
+  echo "done."
+}
+
+attach_session() {
+  local target="$1"
+  if tmux has-session -t "demo-$target" 2>/dev/null; then
+    exec tmux attach -t "demo-$target"
+  fi
+  echo "demo-$target — no such session" >&2
+  exit 1
+}
+
+case "${1-}" in
+  --tear-down|--teardown) teardown; exit 0 ;;
+  --attach) [ $# -ge 2 ] || usage; attach_session "$2" ;;
+  -h|--help) usage ;;
+  "") ;;
+  *) echo "unknown arg: $1" >&2; usage ;;
+esac
+
+# --- preflight -------------------------------------------------------------
+echo "preflight…"
+if ! curl -sfo /dev/null "$CS_URL/health"; then
+  echo "  ✗ CS not reachable at $CS_URL — start it first" >&2
+  exit 1
+fi
+echo "  ✓ CS reachable at $CS_URL"
+
+if [ -z "$CORTEX_DIR" ] || [ ! -x "$CORTEX_DIR/run.sh" ]; then
+  echo "  ✗ Cortex run.sh not found (set CORTEX_DIR=...)" >&2
+  exit 1
+fi
+echo "  ✓ Cortex at $CORTEX_DIR"
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "  ! 'claude' CLI not in PATH — decider session will fail. Continuing." >&2
+fi
+
+# --- start status-collector ------------------------------------------------
+if [ -f "$COLLECTOR_PID_FILE" ] && kill -0 "$(cat "$COLLECTOR_PID_FILE")" 2>/dev/null; then
+  echo "  ✓ status-collector already running (pid $(cat "$COLLECTOR_PID_FILE"))"
+else
+  CS_URL="$CS_URL" nohup "$REPO_ROOT/bin/status-collector" \
+    --cs "$CS_URL" --out "$STATUS_FILE" \
+    > /tmp/cs-status-collector.log 2>&1 &
+  echo $! > "$COLLECTOR_PID_FILE"
+  echo "  ✓ status-collector started (pid $!), log: /tmp/cs-status-collector.log"
+fi
+
+# --- helpers ---------------------------------------------------------------
+launch_agent_session() {
+  local window_num="$1" role="$2" agent_cmd="$3"
+  local session="demo-$role"
+  local title="[$window_num] $role"
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    echo "  · $session already exists, skipping (use --tear-down first to recreate)"
+    return
+  fi
+
+  # Create session with the agent in the only pane. Don't pin width/height —
+  # let tmux match the attaching client. Don't use ``-n`` because some
+  # systems have base-index=1 which makes ``:0`` invalid; we target panes
+  # by relative position (-U/-D) after splitting instead.
+  #
+  # ``remain-on-exit on`` set BEFORE the first command keeps the pane alive
+  # if the agent process exits or the user accidentally Ctrl-D's a shell.
+  # Combined with the ``pane-died`` hook below, the command auto-restarts.
+  tmux new-session -d -s "$session" "$agent_cmd"
+  tmux set-option -t "$session" remain-on-exit on
+  # Terminal-window title: gnome-terminal/xterm/iTerm/etc. read these
+  # OSC-0 escapes and put the string in the OS window title bar. OBS's
+  # Window Capture source lists windows by that title, so a recording
+  # operator can pick "[1] cortex-postgres" out of a list of dozens of
+  # generic "Terminal" entries.
+  tmux set-option -t "$session" set-titles on
+  tmux set-option -t "$session" set-titles-string "$title"
+  tmux select-pane -t "$session" -T "$role"
+
+  # Split: chat-panel below the agent.
+  tmux split-window -t "$session" -v \
+    "CS_URL='$CS_URL' '$REPO_ROOT/bin/chat-panel' --filter '$role' --name 'panel-$role'"
+  tmux select-pane -t "$session" -T "chat (filtered to $role)"
+  tmux select-pane -t "$session" -U   # focus back on agent pane
+
+  # ── stable 65/35 layout that survives client resize ──
+  # main-horizontal puts the "main" pane on top, all others stacked below.
+  # main-pane-height pins it to a percentage of the window height.
+  # The client-resized hook re-applies the layout whenever the attaching
+  # terminal changes size, so opening / detaching / resizing tmux clients
+  # never starves the chat pane.
+  tmux set-option -t "$session" main-pane-height "65%"
+  tmux select-layout -t "$session" main-horizontal
+  tmux set-hook -t "$session" client-resized \
+    "select-layout main-horizontal"
+  # Auto-respawn an agent pane if its process dies (Ctrl-D, crash, etc.).
+  # ``-k`` would kill the pane; we want it kept alive with a restart.
+  tmux set-hook -t "$session" pane-died "respawn-pane -k"
+
+  # Window-level status line + pane-border title visible at top of each pane.
+  tmux set-option -t "$session" pane-border-status top
+  tmux set-option -t "$session" pane-border-format "#{pane_title}"
+  tmux set-option -t "$session" status on
+  tmux set-option -t "$session" status-interval 2
+  tmux set-option -t "$session" status-left "[#S] "
+  tmux set-option -t "$session" status-right "#(CS_STATUS_FILE='$STATUS_FILE' '$REPO_ROOT/bin/status-bar')"
+  tmux set-option -t "$session" status-right-length 200
+  tmux set-option -t "$session" mouse on
+
+  echo "  ✓ session $session"
+}
+
+# --- launch the three agent sessions --------------------------------------
+echo "launching agent sessions…"
+
+VENV_PY="${REPO_ROOT}/.venv/bin/python"
+if [ ! -x "$VENV_PY" ]; then
+  VENV_PY="python3"
+fi
+
+# Each agent runs as ``bin/chat-agent``: subscribes to CS chat, reacts on
+# @-mention, drives Ollama with its character profile. ``; exec bash`` keeps
+# the pane alive even if the agent crashes, so the operator can inspect.
+# The three roles map onto two flavours for the film:
+#   cortex-* → "Cortex" branding (local Ollama, debate roles)
+#   codex    → "Codex" branding (placeholder backend in this version; a real
+#              `codex` CLI bridge belongs to a later iteration)
+chat_agent_cmd() {
+  local agent="$1" profile="$2" model="${3:-gemma4:e4b}"
+  printf "%s '%s' --name '%s' --profile '%s' --model '%s' --cs '%s'; exec bash" \
+    "$VENV_PY" "$REPO_ROOT/bin/chat-agent" "$agent" "$profile" "$model" "$CS_URL"
+}
+
+for entry in "${ROLES_DEF[@]}"; do
+  IFS=: read -r winnum role profile_relpath <<<"$entry"
+  launch_agent_session "$winnum" "$role" \
+    "$(chat_agent_cmd "$role" "$REPO_ROOT/$profile_relpath")"
+done
+
+cat <<EOF
+
+ALL SET. Three tmux sessions are running:
+
+  demo-cortex-postgres   (window title "[1] cortex-postgres")
+  demo-cortex-redis      (window title "[2] cortex-redis")
+  demo-codex             (window title "[3] codex")
+
+Attach each in its own terminal window so OBS can capture them
+separately. The titles "[1]", "[2]", "[3]" are how you tell them apart
+in OBS Window Capture's source picker:
+
+  ssh ${USER:-tomek}@$(hostname) -t 'tmux attach -t demo-cortex-postgres'
+  ssh ${USER:-tomek}@$(hostname) -t 'tmux attach -t demo-cortex-redis'
+  ssh ${USER:-tomek}@$(hostname) -t 'tmux attach -t demo-codex'
+
+The fourth window of the OBS layout is your operator terminal —
+wherever you type the curl that seeds the debate. It is intentionally
+NOT a tmux session managed here, because the operator wants to use
+their own shell with their own history and shortcuts. Seed example:
+
+  curl -s -X POST $CS_URL/api/chat -H 'Content-Type: application/json' \\
+    -d '{"from":"operator","to":"@all","content":"@cortex-postgres @cortex-redis debate Postgres vs Redis for a 100k-user real-time leaderboard. @codex run a benchmark when both have stated."}'
+
+When you are done filming:
+
+  bin/launch-debate-demo --tear-down
+
+EOF
