@@ -1,0 +1,74 @@
+# Runtime state (per-machine, per-session)
+sessions/
+workspaces/
+backups/
+
+# Training data mirror ląduje w deploy/volumes/training/ (v2 timer).
+# Nigdy nie commitowane — docker tworzy katalog przy mount.
+deploy/volumes/training/
+
+# ChromaDB persistent data (binary, regenerated from embeddings)
+semantic-search/data/
+semantic-search/chroma_db/
+
+# Secrets
+**/.env
+**/.env.local
+**/secrets/
+
+# Dependencies
+**/node_modules/
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+
+# Logs, pids, sqlite databases (runtime)
+**/*.log
+**/*.pid
+**/logs/*.log
+consciousness-server/logs/
+consciousness-server/data/
+
+# SQLite databases (runtime, regenerable from schema)
+**/commits.db
+**/commits.db-journal
+**/*.sqlite
+**/*.sqlite3
+**/*.db-journal
+
+# Build artifacts
+**/dist/
+**/build/
+**/*.tsbuildinfo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Backup files (git history IS the backup)
+**/*.backup
+**/*.backup.*
+**/*.backup-*
+**/*.bak
+**/*.bak.*
+**/*.bak-*
+**/*.old
+**/*.old[0-9]
+**/*.pre-*
+**/*.wrong
+
+# Sandbox (created by F3, runtime docker compose state)
+deploy/volumes/
+deploy/*.env
+
+# Embedded git repos (have own remote, managed separately)
+skills-server/
+
+# Agent identity pub keys — bootstrap state, per-deployment.
+# README documents the bootstrap procedure.
+key-server/keys/agents/*.pub
+!key-server/keys/agents/README.md

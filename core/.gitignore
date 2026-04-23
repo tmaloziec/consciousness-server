@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Logs
+*.log
+logs/
+/tmp/
+
+# Data (will be recreated)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/artifacts/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output
+test-results/
+coverage/

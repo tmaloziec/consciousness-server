@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy this file to allowed-clients.json and edit the lists for your deployment. IP whitelist for key-server v1. The example includes Docker bridge CIDRs used by the sandbox compose file. Replace or extend api_keys — the example key is a placeholder, do not use it in production.",
+  "allowed_ips": [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/24",
+    "172.17.0.0/16",
+    "172.18.0.0/16",
+    "172.19.0.0/16",
+    "172.20.0.0/16"
+  ],
+  "api_keys": {
+    "operator-laptop": "REPLACE_WITH_A_RANDOM_SECRET"
+  }
+}

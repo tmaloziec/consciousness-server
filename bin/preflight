@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# preflight — check that the host has everything the ecosystem needs
+# before `docker compose up`.
+#
+# Usage:  bin/preflight
+#
+# Exit 0  — all checks passed, safe to bring the ecosystem up.
+# Exit 1  — something is missing; the script prints exactly what and
+#           how to fix it, then stops.
+#
+# This script only reads. It does not install anything, it does not
+# modify state. You run it, you read what it says, you decide.
+
+set -u
+
+RED=$'\033[0;31m'
+YEL=$'\033[0;33m'
+GRN=$'\033[0;32m'
+RST=$'\033[0m'
+
+ok()    { printf '%s  OK%s     %s\n' "$GRN" "$RST" "$1"; }
+warn()  { printf '%s  WARN%s   %s\n' "$YEL" "$RST" "$1"; }
+fail()  { printf '%s  FAIL%s   %s\n'  "$RED" "$RST" "$1"; FAILED=1; }
+fix()   { printf '         %sfix:%s %s\n' "$YEL" "$RST" "$1"; }
+
+FAILED=0
+
+echo 'ecosystem preflight'
+echo '-------------------'
+
+# --- docker --------------------------------------------------------
+if command -v docker >/dev/null 2>&1; then
+  if docker info >/dev/null 2>&1; then
+    ok "docker daemon reachable"
+  else
+    fail "docker installed but daemon not reachable"
+    fix "start the daemon:  sudo systemctl start docker   (Linux)"
+    fix "                   open Docker Desktop           (Mac/Windows)"
+  fi
+else
+  fail "docker not installed"
+  fix "install Docker Engine: https://docs.docker.com/engine/install/"
+fi
+
+# --- docker compose v2 ---------------------------------------------
+if docker compose version >/dev/null 2>&1; then
+  ok "docker compose v2 present"
+else
+  fail "docker compose v2 not available"
+  fix "install Compose plugin: https://docs.docker.com/compose/install/"
+fi
+
+# --- ollama on host ------------------------------------------------
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+EMBED_MODEL="${EMBEDDING_MODEL:-nomic-embed-text}"
+
+if curl -sf --max-time 3 "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+  ok "ollama reachable at ${OLLAMA_URL}"
+
+  if curl -sf --max-time 3 "${OLLAMA_URL}/api/tags" \
+       | grep -q "\"${EMBED_MODEL}"; then
+    ok "embedding model ${EMBED_MODEL} is pulled"
+  else
+    fail "embedding model ${EMBED_MODEL} is not pulled"
+    fix "ollama pull ${EMBED_MODEL}"
+  fi
+else
+  fail "ollama not running at ${OLLAMA_URL}"
+  fix "install:  curl -fsSL https://ollama.com/install.sh | sh"
+  fix "serve:    ollama serve       (or open Ollama.app on Mac)"
+  fix "model:    ollama pull ${EMBED_MODEL}"
+fi
+
+# --- ports free ----------------------------------------------------
+for p in 3032 3037 3038 3041 3042 6379; do
+  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$p$"; then
+    warn "port $p already bound — compose will fail unless you free it"
+  fi
+done
+
+echo '-------------------'
+if [[ $FAILED -eq 0 ]]; then
+  printf '%sall checks passed — safe to run: docker compose up -d%s\n' "$GRN" "$RST"
+  exit 0
+else
+  printf '%ssome checks failed — fix the items above, then re-run bin/preflight%s\n' "$RED" "$RST"
+  exit 1
+fi

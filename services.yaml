@@ -1,0 +1,54 @@
+# =============================================================================
+# SERVICE REGISTRY - Dynamically checked services
+# =============================================================================
+
+services:
+  # ---------- active core blocks ----------
+  - name: consciousness
+    port: 3032
+    path: /health
+    description: Core — tasks, notes, agents, skills, chat, memory, embedded WS
+    status: active
+
+  - name: semantic-search
+    port: 3037
+    path: /health
+    description: Flask + ChromaDB; embeddings via Ollama
+    status: active
+
+  - name: machines
+    port: 3038
+    path: /health
+    description: Infrastructure awareness (machines, services, realtime telemetry)
+    status: active
+
+  - name: key-server
+    port: 3040
+    path: /health
+    description: ed25519 signed-request verification, agent pub-key bootstrap
+    status: active
+
+  - name: test-runner
+    port: 3041
+    path: /health
+    description: On-demand test execution (pytest/jest/npm) with async job tracking
+    status: active
+
+  - name: git-workflow
+    port: 3042
+    path: /health
+    description: Post-commit hook receiver — records commits per agent into SQLite
+    status: active
+
+  # ---------- external ----------
+  - name: ollama
+    port: 11434
+    path: /api/tags
+    description: Local LLM inference + embedding backend (host-side)
+    status: external
+
+  - name: redis
+    port: 6379
+    path: null
+    description: Shared storage + pub/sub (hard dependency of consciousness-server)
+    status: external

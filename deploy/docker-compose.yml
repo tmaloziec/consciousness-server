@@ -1,0 +1,170 @@
+name: ecosystem-sandbox
+
+# Core ecosystem blocks. Ollama is external (host) via
+# host.docker.internal. See ./README.md.
+#
+# Key-server is opted out of the default profile. A solo user
+# running `docker compose up` brings up CS + SS + skills +
+# test-runner + git-workflow + machines-server + redis — no auth
+# infrastructure, AUTH_MODE defaults to `off`. To bring up
+# key-server for observe/enforce modes:
+#
+#     docker compose --profile full up
+#
+# Redis is a hard dependency of consciousness-server (memory,
+# agent bus, anti-replay). It runs in the default profile.
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: eco-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./volumes/redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  semantic-search:
+    build:
+      context: ../semantic-search
+      dockerfile: Dockerfile
+    container_name: eco-semantic-search
+    # network_mode: host — PoC workaround, Ollama listens only on 127.0.0.1.
+    # Container binds directly on host:3037; no `ports:` mapping needed.
+    # Same trick applies to key-server reachability: host networking
+    # means we reach key-server through its host-mapped port, not
+    # through the docker bridge DNS name.
+    network_mode: host
+    volumes:
+      - ./volumes/chroma:/data/chroma
+      - ./volumes/semantic-search-logs:/app/logs
+    environment:
+      OLLAMA_URL: http://localhost:11434
+      EMBEDDING_MODEL: nomic-embed-text
+      CHROMA_PATH: /data/chroma
+      PORT: "3037"
+      AUTH_MODE: ${AUTH_MODE:-off}
+      KEY_SERVER_URL: http://127.0.0.1:3040
+      AUTH_OBSERVE_LOG: /app/logs/auth-observe.log
+    restart: unless-stopped
+
+  consciousness-server:
+    build:
+      context: ../core
+      dockerfile: Dockerfile
+    container_name: eco-cs
+    ports:
+      - "3032:3032"
+    volumes:
+      - ../agents:/data/agents:ro
+      - ../skills:/data/skills:ro
+      - ./volumes/cs-logs:/app/logs
+    environment:
+      PORT: "3032"
+      CONSCIOUSNESS_HOST: 0.0.0.0
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      AGENTS_DIR: /data/agents
+      SKILLS_DIR: /data/skills
+      OLLAMA_URL: http://host.docker.internal:11434
+      SEMANTIC_SEARCH_URL: http://host.docker.internal:3037
+      HOME: /tmp
+      AUTH_MODE: ${AUTH_MODE:-off}
+      KEY_SERVER_URL: http://key-server:3040
+      AUTH_OBSERVE_LOG: /app/logs/auth-observe.log
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # SS is on host network, depends_on conditions don't apply the same way —
+    # CS retries SS via SEMANTIC_SEARCH_URL until it responds.
+    restart: unless-stopped
+
+  key-server:
+    # Only started under `--profile full` — solo users running the
+    # default profile get the ecosystem with AUTH_MODE=off and do not
+    # need key-server at all.
+    profiles: ["full"]
+    build:
+      context: ../key-server
+      dockerfile: Dockerfile
+    container_name: eco-key-server
+    ports:
+      - "3040:3040"
+    volumes:
+      - ../key-server/keys:/app/keys:ro
+      - ../key-server/auth:/app/auth:ro
+      - ./volumes/key-server-logs:/app/logs
+    environment:
+      KEY_SERVER_PORT: "3040"
+      KEY_SERVER_HOST: 0.0.0.0
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  machines-server:
+    build:
+      context: ../machines-server
+      dockerfile: Dockerfile
+    container_name: eco-machines
+    ports:
+      - "3038:3038"
+    volumes:
+      - ../machines:/data/machines:ro
+      - ../services.yaml:/data/services.yaml:ro
+      - ./volumes/machines-logs:/app/logs
+    environment:
+      PORT: "3038"
+      CS_URL: http://consciousness-server:3032
+      MACHINES_DIR: /data/machines
+      SERVICES_YAML: /data/services.yaml
+      AUTH_MODE: ${AUTH_MODE:-off}
+      KEY_SERVER_URL: http://key-server:3040
+      AUTH_OBSERVE_LOG: /app/logs/auth-observe.log
+    restart: unless-stopped
+
+  git-workflow:
+    build:
+      context: ../git-workflow
+      dockerfile: Dockerfile
+    container_name: eco-git-workflow
+    ports:
+      - "3042:3042"
+    volumes:
+      - ./volumes/git-workflow:/data
+      - ./volumes/git-workflow-logs:/app/logs
+    environment:
+      PORT: "3042"
+      DB_PATH: /data/commits.db
+      AUTH_MODE: ${AUTH_MODE:-off}
+      KEY_SERVER_URL: http://key-server:3040
+      AUTH_OBSERVE_LOG: /app/logs/auth-observe.log
+    restart: unless-stopped
+
+  test-runner:
+    build:
+      context: ../test-runner
+      dockerfile: Dockerfile
+    container_name: eco-test-runner
+    ports:
+      - "3041:3041"
+    volumes:
+      - ./volumes/test-runner-workspaces:/workspaces
+      - ./volumes/test-runner-logs:/app/logs
+    environment:
+      PORT: "3041"
+      AUTH_MODE: ${AUTH_MODE:-off}
+      KEY_SERVER_URL: http://key-server:3040
+      AUTH_OBSERVE_LOG: /app/logs/auth-observe.log
+    restart: unless-stopped

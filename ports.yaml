@@ -1,0 +1,28 @@
+# =============================================================================
+# PORT REGISTRY - Single Source of Truth
+# =============================================================================
+
+ports:
+  # Core Infrastructure (active)
+  consciousness-server: 3032
+  semantic-search: 3037
+  machines-server: 3038
+  key-server: 3040
+  test-runner: 3041
+  git-workflow: 3042
+
+  # External Services
+  redis: 6379
+  ollama: 11434
+
+active_blocks:
+  - consciousness-server
+  - semantic-search
+  - machines-server
+  - key-server
+  - test-runner
+  - git-workflow
+
+# Notes:
+# - Full architecture: ./ARCHITECTURE.md
+# - Health checks: bin/test-blocks.sh

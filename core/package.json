@@ -1,0 +1,24 @@
+{
+  "name": "consciousness-server",
+  "version": "0.1.0",
+  "description": "Consciousness Server - Central awareness point for agent ecosystems",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "consciousness",
+    "memory",
+    "agents"
+  ],
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "redis": "^5.10.0",
+    "uuid": "^9.0.0",
+    "ws": "^8.18.3"
+  }
+}
