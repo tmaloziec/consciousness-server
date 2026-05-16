@@ -18,6 +18,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const { ownPort } = require('./middleware/ports');
+const { NoteTypeValues, TaskStatusValues } = require('./generated/schemas');
 
 const app = express();
 const PORT = ownPort('consciousness-server', 3032);
@@ -575,9 +576,84 @@ async function loadFromRedis() {
 /**
  * GET /health
  * Healthcheck endpoint
+ *
+ * F4.5.4 naming fix: split ambiguous `conversations` into:
+ *  - chat_messages: realtime chat messages (chatMessages array)
+ *  - conversation_embeddings: vectorized chunks in semantic-search (3037)
+ *
+ * `memory.conversations` from <=v1.0.0 was the count of stored full chat
+ * sessions; the new fields disambiguate the two layers explicitly. A null
+ * value for `conversation_embeddings` means semantic-search was unreachable
+ * within the probe window — distinct from "empty" (0).
  */
-app.get('/health', (req, res) => {
+// Optional host allowlist for SEMANTIC_SEARCH_URL. Comma-separated; empty
+// means "trust scheme validation only" (default — keeps single-machine
+// dev/docker setups working without configuration). Set in production if
+// the CS host can reach internal endpoints it should never probe.
+const SEMANTIC_SEARCH_ALLOWED_HOSTS = (process.env.SEMANTIC_SEARCH_ALLOWED_HOSTS || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
+function isValidSemanticSearchUrl(value) {
+  // Allow http(s)://<host>[:<port>][/path]; reject anything else so a
+  // mis-set SEMANTIC_SEARCH_URL can't turn the health probe into an
+  // arbitrary outbound request. If SEMANTIC_SEARCH_ALLOWED_HOSTS is set,
+  // host must match one of the allowlisted entries (CCA 1.3 hardening).
+  let u;
+  try {
+    u = new URL(value);
+  } catch (_) {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  if (SEMANTIC_SEARCH_ALLOWED_HOSTS.length > 0) {
+    return SEMANTIC_SEARCH_ALLOWED_HOSTS.includes(u.hostname.toLowerCase());
+  }
+  return true;
+}
+
+const HEALTH_SEMANTIC_TIMEOUT_MS = parseInt(
+  process.env.HEALTH_SEMANTIC_TIMEOUT_MS || '3000',
+  10
+);
+
+app.get('/health', async (req, res) => {
   const uptime = process.uptime();
+
+  const semanticUrlRaw = process.env.SEMANTIC_SEARCH_URL || 'http://localhost:3037';
+  const semanticUrl = isValidSemanticSearchUrl(semanticUrlRaw)
+    ? semanticUrlRaw
+    : null;
+
+  let conversationEmbeddings = null;
+  let semanticHealth = 'ok';
+  if (!semanticUrl) {
+    semanticHealth = 'misconfigured';
+    console.warn(
+      `[health] SEMANTIC_SEARCH_URL is not a valid http(s) URL: ${JSON.stringify(semanticUrlRaw)} — skipping probe`
+    );
+  } else {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), HEALTH_SEMANTIC_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${semanticUrl}/health`, { signal: ctrl.signal });
+      if (r.ok) {
+        const j = await r.json();
+        conversationEmbeddings = j?.collections?.conversations ?? null;
+      } else {
+        semanticHealth = `http_${r.status}`;
+      }
+    } catch (err) {
+      semanticHealth = err.name === 'AbortError' ? 'timeout' : 'unreachable';
+      // Surface the reason once per probe — keeps "empty" distinguishable
+      // from "down" without spamming on every health request.
+      console.warn(`[health] semantic-search probe ${semanticHealth}: ${err.message || err.name}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   res.json({
     status: 'ok',
     uptime: Math.floor(uptime),
@@ -588,9 +664,11 @@ app.get('/health', (req, res) => {
       agents: agents.length,
       brainstorms: brainstorms.length,
       notes: notes.length,
-      conversations: conversations.length,
+      chat_messages: chatMessages.length,
+      conversation_embeddings: conversationEmbeddings,
       training_data: trainingData.length
     },
+    semantic_search: semanticHealth,
     timestamp: getCurrentTimestamp()
   });
 });
@@ -612,7 +690,12 @@ function emitTaskEvent(type, data) {
     .catch(err => console.error('Redis publish error:', err));
 }
 
-app.post('/api/tasks/create', (req, res) => {
+// Canonical task-creation handler.
+// Mounted on both `POST /api/tasks` (matches OpenAPI contract and
+// ARCHITECTURE.md) and `POST /api/tasks/create` (legacy alias kept for
+// existing clients that targeted the early MVP path). Both routes return
+// the full Task per `lib/schemas/tasks.openapi.yaml`.
+function createTaskHandler(req, res) {
   const { project, assigned_to, created_by, title, description, priority, metadata } = req.body;
 
   // Rate limit check for task creation (2026-01-14)
@@ -668,12 +751,14 @@ app.post('/api/tasks/create', (req, res) => {
   logs.push(log);
   saveLog(log); // Redis persist
 
-  res.status(201).json({
-    task_id: task.id,
-    status: task.status,
-    created_at: task.created_at
-  });
-});
+  // F4.6 P1: respond with the full Task per lib/schemas/tasks.openapi.yaml.
+  // Pre-v1.1.0 clients that only read task_id/status/created_at keep working
+  // (the response is a strict superset).
+  res.status(201).json(task);
+}
+
+app.post('/api/tasks', createTaskHandler);
+app.post('/api/tasks/create', createTaskHandler);
 
 /**
  * GET /api/tasks/pending/:agent
@@ -782,11 +867,14 @@ app.patch('/api/tasks/:id/status', (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
 
-  const validStatuses = ['PENDING', 'IN_PROGRESS', 'DONE', 'FAILED', 'CANCELLED'];
-  if (!validStatuses.includes(status)) {
+  // F4.6 SSOT: TaskStatus enum sourced from lib/schemas/tasks.openapi.yaml
+  // via generated/schemas/tasks.js → TaskStatusValues. Same pattern as
+  // NoteTypeValues for notes — add a status to the YAML, regenerate, server
+  // accepts it.
+  if (!TaskStatusValues.includes(status)) {
     return res.status(400).json({
       error: 'Invalid status',
-      valid_statuses: validStatuses
+      valid_statuses: TaskStatusValues
     });
   }
 
@@ -2474,9 +2562,17 @@ app.post('/api/memory/summaries', async (req, res) => {
   await saveSummary(summaryDoc);
 
   // Auto-embed to ChromaDB (semantic-search)
+  // F4.5.4+: same SEMANTIC_SEARCH_URL validation as /health probe — a
+  // misconfigured value shouldn't turn this auto-embed into an arbitrary
+  // outbound request (SSRF-adjacent for operator misconfig).
   try {
+    const semanticUrlRaw = process.env.SEMANTIC_SEARCH_URL || 'http://localhost:3037';
+    if (!isValidSemanticSearchUrl(semanticUrlRaw)) {
+      console.warn(`[summaries] SEMANTIC_SEARCH_URL is not a valid http(s) URL: ${JSON.stringify(semanticUrlRaw)} — skipping auto-embed`);
+      return res.status(201).json(summaryDoc);
+    }
     const embedText = `Agent: ${agent}\nSummary: ${summary}\nActions: ${(key_actions || []).join(', ')}`;
-    const response = await fetch(`${process.env.SEMANTIC_SEARCH_URL || 'http://localhost:3037'}/api/embed`, {
+    const response = await fetch(`${semanticUrlRaw}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2609,7 +2705,9 @@ app.get('/api/memory/stats', (req, res) => {
  * POST /api/notes
  * Create new note
  * Body: { agent, type, title, content, tags?, visibility?, expires_at? }
- * type: observation | decision | blocker | idea | handoff
+ * type: see NoteTypeValues from generated/schemas/notes.js (canonical list:
+ *   observation, decision, blocker, idea, handoff, session_end, audit).
+ * visibility: all | agents | user (per lib/schemas/notes.openapi.yaml).
  */
 app.post('/api/notes', async (req, res) => {
   const { agent, type, title, content, tags, visibility, expires_at, metadata } = req.body;
@@ -2621,11 +2719,14 @@ app.post('/api/notes', async (req, res) => {
     });
   }
 
-  const validTypes = ['observation', 'decision', 'blocker', 'idea', 'handoff', 'session_end'];
-  if (!validTypes.includes(type)) {
+  // F4.5.6: NoteType enum sourced from lib/schemas/notes.openapi.yaml via the
+  // F4.6 codegen pipeline (generated/schemas/notes.js → NoteTypeValues). Add
+  // a new type to the YAML, run `bin/sync-schema`, and this handler accepts
+  // it automatically — single source of truth.
+  if (!NoteTypeValues.includes(type)) {
     return res.status(400).json({
       error: 'Invalid type',
-      valid_types: validTypes
+      valid_types: NoteTypeValues
     });
   }
 
@@ -2636,7 +2737,7 @@ app.post('/api/notes', async (req, res) => {
     title: title,
     content: content || '',
     tags: tags || [],
-    visibility: visibility || 'all', // all, agents, operator
+    visibility: visibility || 'all', // all | agents | user (NoteVisibility schema)
     metadata: metadata || null,
     expires_at: expires_at || null,
     created_at: getCurrentTimestamp(),
@@ -2649,10 +2750,11 @@ app.post('/api/notes', async (req, res) => {
   // Broadcast to WebSocket
   broadcastToWs({ type: 'note_created', data: note });
 
-  res.status(201).json({
-    note_id: note.id,
-    created_at: note.created_at
-  });
+  // F4.6 P1: respond with the full Note per lib/schemas/notes.openapi.yaml.
+  // Generated clients expect the full object (id, agent, type, title, content,
+  // tags, visibility, created_at, updated_at). Pre-v1.1.0 callers that only
+  // read note_id/created_at keep working — the response is a strict superset.
+  res.status(201).json(note);
 });
 
 /**
@@ -3142,9 +3244,41 @@ async function loadChatFromRedis() {
   console.log(`📨 Loaded ${chatMessages.length} chat messages from Redis`);
 }
 
+// F4.8: dynamic mentions parser — uses live agents[] registry instead of
+// hardcoded allowlist. Any agent registered via POST /api/agents/register
+// becomes a valid @mention target. ALL preserved as broadcast token.
+// Regex accepts dashes/digits/underscores: @CC-TESTER, @agent-001 work.
+//
+// Notes:
+//  - Agents with null/undefined names are skipped (would otherwise key as
+//    "NULL"/"UNDEFINED" and accept those literal @mentions).
+//  - If an agent happens to be registered with the literal name "ALL", the
+//    broadcast token still wins — receivers expect @ALL to mean everyone,
+//    not the one agent named ALL.
 function extractMentions(content) {
-  const matches = content.match(/@(worker1|agent2|coord|all)/gi) || [];
-  return [...new Set(matches.map(m => m.toUpperCase().replace("@", "")))];
+  if (typeof content !== 'string') return [];
+
+  const registeredAgents = new Map();
+  for (const agent of agents) {
+    if (agent == null || agent.name == null) continue;
+    const name = String(agent.name);
+    if (!name) continue;
+    registeredAgents.set(name.toUpperCase(), name);
+  }
+  // ALL broadcast token always wins — set last so it overrides any agent
+  // that happens to be registered with the literal name "ALL".
+  registeredAgents.set('ALL', 'ALL');
+
+  const mentions = [];
+  const mentionRegex = /@([A-Za-z][A-Za-z0-9_-]*)/g;
+  for (const match of content.matchAll(mentionRegex)) {
+    const key = match[1].toUpperCase();
+    const canonicalName = registeredAgents.get(key);
+    if (canonicalName && !mentions.includes(canonicalName)) {
+      mentions.push(canonicalName);
+    }
+  }
+  return mentions;
 }
 
 /**

@@ -1,0 +1,1167 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Consciousness Server Tasks API",
+    "version": "0.3.0-draft",
+    "description": "Draft contract for the task endpoints used by BuildOnAI agents.",
+    "x-sync-schema-bundled": true,
+    "x-sync-schema-source": "lib/schemas/tasks.openapi.yaml"
+  },
+  "servers": [
+    {
+      "url": "/api",
+      "description": "Same-origin"
+    }
+  ],
+  "tags": [
+    {
+      "name": "tasks",
+      "description": "Agent task queue operations"
+    }
+  ],
+  "paths": {
+    "/tasks": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "listTasks",
+        "summary": "List tasks",
+        "description": "Results ordered by created_at DESC, ties broken by id.",
+        "parameters": [
+          {
+            "name": "assigned_to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Return only tasks assigned to this agent.",
+            "example": "CDX"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PENDING",
+                "IN_PROGRESS",
+                "DONE",
+                "FAILED",
+                "CANCELLED"
+              ]
+            },
+            "description": "Return only tasks in this status.",
+            "example": "PENDING"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "description": "Maximum number of tasks to return."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Number of matching tasks to skip before returning results."
+          },
+          {
+            "name": "created_after",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Return tasks created strictly after this timestamp.",
+            "example": "2026-05-09T23:24:57.451Z"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching tasks and pagination metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "total",
+                    "pagination",
+                    "tasks"
+                  ],
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Total number of tasks matching the filters."
+                    },
+                    "pagination": {
+                      "type": "object",
+                      "required": [
+                        "limit",
+                        "offset",
+                        "returned"
+                      ],
+                      "properties": {
+                        "limit": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "returned": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "next_offset": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "nullable": true
+                        }
+                      }
+                    },
+                    "tasks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "project",
+                          "assigned_to",
+                          "created_by",
+                          "title",
+                          "description",
+                          "priority",
+                          "status",
+                          "created_at"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "project": {
+                            "type": "string"
+                          },
+                          "assigned_to": {
+                            "type": "string"
+                          },
+                          "created_by": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "priority": {
+                            "type": "string",
+                            "enum": [
+                              "URGENT",
+                              "HIGH",
+                              "NORMAL",
+                              "LOW"
+                            ]
+                          },
+                          "metadata": {
+                            "type": "object",
+                            "nullable": true,
+                            "additionalProperties": true
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "PENDING",
+                              "IN_PROGRESS",
+                              "DONE",
+                              "FAILED",
+                              "CANCELLED"
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "deadline": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true,
+                            "description": "Target completion deadline. Optional; absence means no explicit due-by."
+                          },
+                          "claimed_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          },
+                          "started_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          },
+                          "completed_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          },
+                          "result": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "artifacts_path": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request validation failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "createTask",
+        "summary": "Create task",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "project",
+                  "assigned_to",
+                  "created_by",
+                  "title"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "assigned_to": {
+                    "type": "string"
+                  },
+                  "created_by": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "priority": {
+                    "allOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "URGENT",
+                          "HIGH",
+                          "NORMAL",
+                          "LOW"
+                        ]
+                      }
+                    ],
+                    "default": "NORMAL"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "nullable": true,
+                    "additionalProperties": true
+                  },
+                  "deadline": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true,
+                    "description": "Target completion deadline. Optional; absence means no explicit due-by."
+                  },
+                  "artifacts_path": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Task created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "project",
+                    "assigned_to",
+                    "created_by",
+                    "title",
+                    "description",
+                    "priority",
+                    "status",
+                    "created_at"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "project": {
+                      "type": "string"
+                    },
+                    "assigned_to": {
+                      "type": "string"
+                    },
+                    "created_by": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "priority": {
+                      "type": "string",
+                      "enum": [
+                        "URGENT",
+                        "HIGH",
+                        "NORMAL",
+                        "LOW"
+                      ]
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PENDING",
+                        "IN_PROGRESS",
+                        "DONE",
+                        "FAILED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "deadline": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "Target completion deadline. Optional; absence means no explicit due-by."
+                    },
+                    "claimed_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "started_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "completed_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "result": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "artifacts_path": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request validation failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Task creation rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{id}": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "getTask",
+        "summary": "Get task by ID",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Task identifier."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task details.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "project",
+                    "assigned_to",
+                    "created_by",
+                    "title",
+                    "description",
+                    "priority",
+                    "status",
+                    "created_at"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "project": {
+                      "type": "string"
+                    },
+                    "assigned_to": {
+                      "type": "string"
+                    },
+                    "created_by": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "priority": {
+                      "type": "string",
+                      "enum": [
+                        "URGENT",
+                        "HIGH",
+                        "NORMAL",
+                        "LOW"
+                      ]
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PENDING",
+                        "IN_PROGRESS",
+                        "DONE",
+                        "FAILED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "deadline": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "Target completion deadline. Optional; absence means no explicit due-by."
+                    },
+                    "claimed_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "started_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "completed_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "result": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "artifacts_path": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task was not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "patchTask",
+        "summary": "Patch task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Task identifier."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": false,
+                "properties": {
+                  "assigned_to": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "PENDING",
+                      "IN_PROGRESS",
+                      "DONE",
+                      "FAILED",
+                      "CANCELLED"
+                    ]
+                  },
+                  "priority": {
+                    "type": "string",
+                    "enum": [
+                      "URGENT",
+                      "HIGH",
+                      "NORMAL",
+                      "LOW"
+                    ]
+                  },
+                  "result": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "nullable": true,
+                    "additionalProperties": true
+                  },
+                  "deadline": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true,
+                    "description": "Target completion deadline. Optional; absence means no explicit due-by."
+                  },
+                  "artifacts_path": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Task updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "project",
+                    "assigned_to",
+                    "created_by",
+                    "title",
+                    "description",
+                    "priority",
+                    "status",
+                    "created_at"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "project": {
+                      "type": "string"
+                    },
+                    "assigned_to": {
+                      "type": "string"
+                    },
+                    "created_by": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "priority": {
+                      "type": "string",
+                      "enum": [
+                        "URGENT",
+                        "HIGH",
+                        "NORMAL",
+                        "LOW"
+                      ]
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PENDING",
+                        "IN_PROGRESS",
+                        "DONE",
+                        "FAILED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "deadline": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "Target completion deadline. Optional; absence means no explicit due-by."
+                    },
+                    "claimed_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "started_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "completed_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "result": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "artifacts_path": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request validation failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task was not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "TaskId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "description": "Task identifier."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Request validation failed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "error"
+              ],
+              "properties": {
+                "error": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "details": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Task was not found.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "error"
+              ],
+              "properties": {
+                "error": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "details": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Task creation rate limit was exceeded.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "error"
+              ],
+              "properties": {
+                "error": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "details": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "TaskStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "IN_PROGRESS",
+          "DONE",
+          "FAILED",
+          "CANCELLED"
+        ]
+      },
+      "TaskPriority": {
+        "type": "string",
+        "enum": [
+          "URGENT",
+          "HIGH",
+          "NORMAL",
+          "LOW"
+        ]
+      },
+      "Task": {
+        "type": "object",
+        "required": [
+          "id",
+          "project",
+          "assigned_to",
+          "created_by",
+          "title",
+          "description",
+          "priority",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "project": {
+            "type": "string"
+          },
+          "assigned_to": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "URGENT",
+              "HIGH",
+              "NORMAL",
+              "LOW"
+            ]
+          },
+          "metadata": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "DONE",
+              "FAILED",
+              "CANCELLED"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Target completion deadline. Optional; absence means no explicit due-by."
+          },
+          "claimed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "result": {
+            "type": "string",
+            "nullable": true
+          },
+          "artifacts_path": {
+            "type": "string",
+            "nullable": true,
+            "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+          }
+        }
+      },
+      "TaskCreate": {
+        "type": "object",
+        "required": [
+          "project",
+          "assigned_to",
+          "created_by",
+          "title"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "type": "string"
+          },
+          "assigned_to": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "default": ""
+          },
+          "priority": {
+            "allOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "URGENT",
+                  "HIGH",
+                  "NORMAL",
+                  "LOW"
+                ]
+              }
+            ],
+            "default": "NORMAL"
+          },
+          "metadata": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Target completion deadline. Optional; absence means no explicit due-by."
+          },
+          "artifacts_path": {
+            "type": "string",
+            "nullable": true,
+            "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+          }
+        }
+      },
+      "TaskPatch": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "assigned_to": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "DONE",
+              "FAILED",
+              "CANCELLED"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "URGENT",
+              "HIGH",
+              "NORMAL",
+              "LOW"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Target completion deadline. Optional; absence means no explicit due-by."
+          },
+          "artifacts_path": {
+            "type": "string",
+            "nullable": true,
+            "description": "Filesystem path to task artifacts or outputs (e.g. logs, generated files). Optional."
+          }
+        }
+      }
+    }
+  }
+}

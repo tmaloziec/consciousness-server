@@ -1,0 +1,1017 @@
+#!/usr/bin/env python3
+"""Generate schema artifacts from lib/schemas OpenAPI contracts.
+
+Phase 1 scope:
+- load lib/schemas/*.openapi.yaml
+- validate the supported schema subset
+- resolve local and _common $refs
+- write generated/openapi/*.bundle.openapi.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import keyword
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - exercised only on broken envs
+    yaml = None
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCHEMA_DIR = REPO_ROOT / "lib" / "schemas"
+OPENAPI_OUT_DIR = REPO_ROOT / "generated" / "openapi"
+TS_OPENAPI_OUT_DIR = REPO_ROOT / "dashboard-v3" / "frontend" / "src" / "generated" / "schemas" / "openapi"
+TS_SCHEMA_OUT_DIR = REPO_ROOT / "dashboard-v3" / "frontend" / "src" / "generated" / "schemas"
+PY_SCHEMA_OUT_DIR = REPO_ROOT / "dashboard-v3" / "backend" / "generated" / "schemas"
+JS_SCHEMA_OUT_DIR = REPO_ROOT / "core" / "generated" / "schemas"
+DASHBOARD_DIR = REPO_ROOT / "dashboard-v3"
+DASHBOARD_PACKAGE_JSON = DASHBOARD_DIR / "package.json"
+
+CONTRACTS = ("_common", "chat", "notes", "tasks")
+LANGS = ("openapi", "ts", "python", "js")
+SUPPORTED_LANGS = ("openapi", "ts", "python", "js")
+TS_CONTRACT_FILENAMES = {
+    "_common": "common.ts",
+    "chat": "chat.ts",
+    "notes": "notes.ts",
+    "tasks": "tasks.ts",
+}
+PY_CONTRACT_FILENAMES = {
+    "_common": "common.py",
+    "chat": "chat.py",
+    "notes": "notes.py",
+    "tasks": "tasks.py",
+}
+JS_CONTRACT_FILENAMES = {
+    "_common": "common.js",
+    "chat": "chat.js",
+    "notes": "notes.js",
+    "tasks": "tasks.js",
+}
+
+SUPPORTED_SCHEMA_KEYS = {
+    "$ref",
+    "additionalProperties",
+    "allOf",
+    "default",
+    "description",
+    "enum",
+    "example",
+    "format",
+    "items",
+    "maxLength",
+    "maximum",
+    "minLength",
+    "minimum",
+    "minProperties",
+    "nullable",
+    "properties",
+    "required",
+    "type",
+}
+
+SUPPORTED_OBJECT_KEYS = {
+    "openapi",
+    "info",
+    "servers",
+    "tags",
+    "paths",
+    "components",
+}
+
+
+class SyncSchemaError(Exception):
+    """Known sync-schema failure."""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate schema artifacts from lib/schemas OpenAPI contracts."
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check whether generated files are current without writing them.",
+    )
+    parser.add_argument(
+        "--contract",
+        choices=CONTRACTS,
+        help="Generate one contract only.",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=LANGS,
+        help="Generate one language/artifact family. Phase 4 supports openapi, ts, python, and js.",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Remove generated/openapi before writing outputs.",
+    )
+    return parser.parse_args()
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if yaml is None:
+        raise SyncSchemaError("PyYAML is required: import yaml failed")
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except OSError as exc:
+        raise SyncSchemaError(f"failed to read {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise SyncSchemaError(f"failed to parse YAML {path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise SyncSchemaError(f"{path} must parse to a mapping")
+    return data
+
+
+def load_specs() -> dict[str, dict[str, Any]]:
+    specs: dict[str, dict[str, Any]] = {}
+    for contract in CONTRACTS:
+        path = SCHEMA_DIR / f"{contract}.openapi.yaml"
+        specs[contract] = load_yaml(path)
+    return specs
+
+
+def json_pointer_get(document: Any, pointer: str, source: str) -> Any:
+    if not pointer.startswith("#/"):
+        raise SyncSchemaError(f"unsupported ref pointer in {source}: {pointer}")
+
+    current = document
+    for raw_part in pointer[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or part not in current:
+            raise SyncSchemaError(f"unresolvable ref in {source}: {pointer}")
+        current = current[part]
+    return current
+
+
+def resolve_ref(ref: str, current_contract: str, specs: dict[str, dict[str, Any]]) -> Any:
+    if ref.startswith("#/"):
+        return json_pointer_get(specs[current_contract], ref, current_contract)
+
+    if ref.startswith("./_common.openapi.yaml#/"):
+        pointer = "#" + ref.split("#", 1)[1]
+        return json_pointer_get(specs["_common"], pointer, current_contract)
+
+    raise SyncSchemaError(f"unsupported $ref in {current_contract}: {ref}")
+
+
+def resolve_refs(node: Any, current_contract: str, specs: dict[str, dict[str, Any]], stack: tuple[str, ...] = ()) -> Any:
+    if isinstance(node, list):
+        return [resolve_refs(item, current_contract, specs, stack) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    if "$ref" in node:
+        ref = node["$ref"]
+        if not isinstance(ref, str):
+            raise SyncSchemaError(f"non-string $ref in {current_contract}: {ref!r}")
+        if ref in stack:
+            chain = " -> ".join((*stack, ref))
+            raise SyncSchemaError(f"cyclic $ref in {current_contract}: {chain}")
+        resolved = copy.deepcopy(resolve_ref(ref, current_contract, specs))
+        sibling_keys = {k: v for k, v in node.items() if k != "$ref"}
+        if sibling_keys:
+            merged = resolve_refs(resolved, current_contract, specs, (*stack, ref))
+            if not isinstance(merged, dict):
+                raise SyncSchemaError(f"$ref with siblings resolved to non-object in {current_contract}: {ref}")
+            merged.update(resolve_refs(sibling_keys, current_contract, specs, (*stack, ref)))
+            return merged
+        return resolve_refs(resolved, current_contract, specs, (*stack, ref))
+
+    return {
+        key: resolve_refs(value, current_contract, specs, stack)
+        for key, value in node.items()
+    }
+
+
+def validate_root(contract: str, spec: dict[str, Any]) -> None:
+    unknown_root_keys = set(spec) - SUPPORTED_OBJECT_KEYS
+    if unknown_root_keys:
+        raise SyncSchemaError(
+            f"{contract}: unsupported root keys: {', '.join(sorted(unknown_root_keys))}"
+        )
+    if spec.get("openapi") != "3.0.3":
+        raise SyncSchemaError(f"{contract}: expected openapi 3.0.3")
+    if "components" not in spec or not isinstance(spec["components"], dict):
+        raise SyncSchemaError(f"{contract}: missing components mapping")
+    schemas = spec["components"].get("schemas")
+    if not isinstance(schemas, dict):
+        raise SyncSchemaError(f"{contract}: missing components.schemas mapping")
+
+
+def validate_schema_node(contract: str, schema_name: str, node: Any, path: str) -> None:
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            validate_schema_node(contract, schema_name, item, f"{path}[{index}]")
+        return
+
+    if not isinstance(node, dict):
+        return
+
+    unknown = set(node) - SUPPORTED_SCHEMA_KEYS
+    if unknown:
+        raise SyncSchemaError(
+            f"{contract}.{schema_name}: unsupported schema keys at {path}: {', '.join(sorted(unknown))}"
+        )
+
+    schema_type = node.get("type")
+    if schema_type is not None and schema_type not in {"object", "string", "integer", "array", "boolean"}:
+        raise SyncSchemaError(f"{contract}.{schema_name}: unsupported type at {path}: {schema_type}")
+
+    if "oneOf" in node or "anyOf" in node or "not" in node:
+        raise SyncSchemaError(f"{contract}.{schema_name}: unsupported composition at {path}")
+
+    for key, value in node.items():
+        if key == "properties" and isinstance(value, dict):
+            for prop_name, prop_schema in value.items():
+                validate_schema_node(contract, schema_name, prop_schema, f"{path}.properties.{prop_name}")
+        elif key in {"items", "additionalProperties"}:
+            if isinstance(value, dict):
+                validate_schema_node(contract, schema_name, value, f"{path}.{key}")
+            elif key == "additionalProperties" and isinstance(value, bool):
+                continue
+        elif key == "allOf" and isinstance(value, list):
+            validate_schema_node(contract, schema_name, value, f"{path}.allOf")
+
+
+def validate_specs(specs: dict[str, dict[str, Any]]) -> None:
+    seen_schemas: dict[str, str] = {}
+    for contract, spec in specs.items():
+        validate_root(contract, spec)
+        schemas = spec["components"]["schemas"]
+        for schema_name, schema in schemas.items():
+            if schema_name in seen_schemas and contract != "_common":
+                raise SyncSchemaError(
+                    f"duplicate schema name {schema_name!r} in {contract}; first seen in {seen_schemas[schema_name]}"
+                )
+            seen_schemas.setdefault(schema_name, contract)
+            validate_schema_node(contract, schema_name, schema, f"components.schemas.{schema_name}")
+
+
+def selected_contracts(contract: str | None) -> tuple[str, ...]:
+    if contract:
+        return (contract,)
+    return CONTRACTS
+
+
+def selected_langs(lang: str | None) -> tuple[str, ...]:
+    if lang:
+        if lang not in SUPPORTED_LANGS:
+            supported = ", ".join(SUPPORTED_LANGS)
+            raise SyncSchemaError(f"Phase 4 supports only --lang {supported}, got --lang {lang}")
+        if lang in ("ts", "python") and not DASHBOARD_DIR.exists():
+            raise SyncSchemaError(
+                f"--lang {lang} requires the dashboard-v3 tree at {DASHBOARD_DIR}, "
+                "which is not present in this public repo layout. Use --lang openapi "
+                "or --lang js, or clone the full ecosystem-mirror to get the dashboard."
+            )
+        return (lang,)
+    # Public repo may ship without dashboard-v3 (TS/Python targets live there).
+    # Auto-disable those when the dashboard tree is absent so --check works on
+    # a fresh clone. Full ecosystem with dashboard-v3 still gets all 4 langs.
+    if not DASHBOARD_DIR.exists():
+        return tuple(l for l in SUPPORTED_LANGS if l not in ("ts", "python"))
+    return SUPPORTED_LANGS
+
+
+def bundle_contract(contract: str, specs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    spec = copy.deepcopy(specs[contract])
+    bundled = resolve_refs(spec, contract, specs)
+    bundled.setdefault("info", {})
+    bundled["info"]["x-sync-schema-bundled"] = True
+    bundled["info"]["x-sync-schema-source"] = f"lib/schemas/{contract}.openapi.yaml"
+    return bundled
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False, sort_keys=False)
+        handle.write("\n")
+
+
+def generate_openapi(out_dir: Path, contracts: tuple[str, ...], specs: dict[str, dict[str, Any]]) -> list[Path]:
+    written: list[Path] = []
+    for contract in contracts:
+        bundle = bundle_contract(contract, specs)
+        out_path = out_dir / f"{contract}.bundle.openapi.json"
+        write_json(out_path, bundle)
+        written.append(out_path)
+    return written
+
+
+def run_command(cmd: list[str], cwd: Path) -> None:
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError as exc:
+        raise SyncSchemaError(f"failed to run {' '.join(cmd)}: {exc}") from exc
+
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.returncode != 0:
+        raise SyncSchemaError(f"command failed with exit {completed.returncode}: {' '.join(cmd)}")
+
+
+def openapi_typescript_package() -> str:
+    try:
+        package_data = json.loads(DASHBOARD_PACKAGE_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncSchemaError(f"failed to read {DASHBOARD_PACKAGE_JSON}: {exc}") from exc
+
+    version = package_data.get("devDependencies", {}).get("openapi-typescript")
+    if not isinstance(version, str) or not version:
+        raise SyncSchemaError(f"openapi-typescript missing in {DASHBOARD_PACKAGE_JSON}")
+
+    pinned = version.lstrip("^~")
+    return f"openapi-typescript@{pinned}"
+
+
+def add_generated_header(path: Path, source: str) -> None:
+    body = path.read_text(encoding="utf-8")
+    header = (
+        "/**\n"
+        " * AUTO-GENERATED by bin/sync-schema. Do not edit.\n"
+        f" * Source: {source}\n"
+        " */\n\n"
+    )
+    if body.startswith("/**\n * AUTO-GENERATED by bin/sync-schema."):
+        return
+    path.write_text(header + body, encoding="utf-8")
+
+
+def generate_ts(openapi_dir: Path, out_dir: Path, contracts: tuple[str, ...]) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for contract in contracts:
+        input_path = openapi_dir / f"{contract}.bundle.openapi.json"
+        if not input_path.exists():
+            raise SyncSchemaError(f"missing OpenAPI bundle for TS generation: {input_path}")
+        output_name = TS_CONTRACT_FILENAMES[contract]
+        output_path = out_dir / output_name
+        run_command(
+            [
+                "npx",
+                "--yes",
+                openapi_typescript_package(),
+                str(input_path),
+                "-o",
+                str(output_path),
+            ],
+            DASHBOARD_DIR,
+        )
+        add_generated_header(output_path, f"generated/openapi/{input_path.name}")
+        written.append(output_path)
+    return written
+
+
+def write_ts_barrel(out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    index_path = out_dir / "index.ts"
+    content = """/**
+ * AUTO-GENERATED by bin/sync-schema. Do not edit.
+ * Source: generated/openapi/*.bundle.openapi.json
+ */
+
+import type { components as CommonComponents } from './openapi/common';
+import type { components as ChatComponents } from './openapi/chat';
+import type { components as NotesComponents } from './openapi/notes';
+import type { components as TasksComponents } from './openapi/tasks';
+
+export type ErrorResponse = CommonComponents['schemas']['ErrorResponse'];
+export type Pagination = CommonComponents['schemas']['Pagination'];
+
+export type ChatMessage = ChatComponents['schemas']['ChatMessage'];
+
+export type Note = NotesComponents['schemas']['Note'];
+export type NoteType = NotesComponents['schemas']['NoteType'];
+export type NoteVisibility = NotesComponents['schemas']['NoteVisibility'];
+
+export type Task = TasksComponents['schemas']['Task'];
+export type TaskStatus = TasksComponents['schemas']['TaskStatus'];
+export type TaskPriority = TasksComponents['schemas']['TaskPriority'];
+"""
+    index_path.write_text(content, encoding="utf-8")
+    return index_path
+
+
+def py_header(source: str) -> str:
+    return (
+        "# AUTO-GENERATED by bin/sync-schema. Do not edit.\n"
+        f"# Source: {source}\n\n"
+        "from __future__ import annotations\n\n"
+    )
+
+
+def enum_member_name(value: Any, used: set[str]) -> str:
+    name = re.sub(r"[^0-9A-Za-z]+", "_", str(value)).strip("_").upper()
+    if not name:
+        name = "VALUE"
+    if name[0].isdigit():
+        name = f"VALUE_{name}"
+    if keyword.iskeyword(name.lower()):
+        name = f"{name}_"
+    candidate = name
+    suffix = 2
+    while candidate in used:
+        candidate = f"{name}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def py_identifier(value: str) -> tuple[str, str | None]:
+    candidate = re.sub(r"\W", "_", value)
+    if not candidate or candidate[0].isdigit():
+        candidate = f"field_{candidate}"
+    if keyword.iskeyword(candidate):
+        return f"{candidate}_", value
+    if candidate != value:
+        return candidate, value
+    return candidate, None
+
+
+def merged_allof_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    if "allOf" not in schema or not isinstance(schema["allOf"], list) or len(schema["allOf"]) != 1:
+        return schema
+    merged = copy.deepcopy(schema["allOf"][0])
+    if not isinstance(merged, dict):
+        return schema
+    for key, value in schema.items():
+        if key != "allOf":
+            merged[key] = value
+    return merged
+
+
+def enum_signature(schema: dict[str, Any]) -> tuple[Any, ...] | None:
+    schema = merged_allof_schema(schema)
+    values = schema.get("enum")
+    if isinstance(values, list):
+        return tuple(values)
+    return None
+
+
+def py_type_name(
+    schema: dict[str, Any],
+    enum_by_signature: dict[tuple[Any, ...], str],
+) -> tuple[str, bool]:
+    schema = merged_allof_schema(schema)
+    is_nullable = schema.get("nullable") is True
+    signature = enum_signature(schema)
+    if signature and signature in enum_by_signature:
+        return enum_by_signature[signature], is_nullable
+
+    schema_type = schema.get("type")
+    if schema_type == "string" and schema.get("format") == "date-time":
+        return "datetime", is_nullable
+    if schema_type == "string":
+        return "str", is_nullable
+    if schema_type == "integer":
+        return "int", is_nullable
+    if schema_type == "boolean":
+        return "bool", is_nullable
+    if schema_type == "array":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            item_type, _ = py_type_name(items, enum_by_signature)
+        else:
+            item_type = "Any"
+        return f"list[{item_type}]", is_nullable
+    if schema_type == "object":
+        return "dict[str, Any]", is_nullable
+    return "Any", is_nullable
+
+
+def py_type_expr(schema: dict[str, Any], required: bool, enum_by_signature: dict[tuple[Any, ...], str]) -> str:
+    base_type, nullable = py_type_name(schema, enum_by_signature)
+    if nullable or not required:
+        return f"{base_type} | None"
+    return base_type
+
+
+def py_default_expr(required: bool, alias: str | None) -> str:
+    if alias is None:
+        return "" if required else " = None"
+    default = "..." if required else "None"
+    return f" = Field({default}, alias={alias!r})"
+
+
+def render_py_enum(name: str, schema: dict[str, Any]) -> list[str]:
+    values = schema.get("enum")
+    if not isinstance(values, list):
+        raise SyncSchemaError(f"{name}: enum schema missing enum values")
+    lines = [f"class {name}(str, Enum):"]
+    used: set[str] = set()
+    for value in values:
+        lines.append(f"    {enum_member_name(value, used)} = {value!r}")
+    if len(lines) == 1:
+        lines.append("    pass")
+    return lines
+
+
+def render_py_model(name: str, schema: dict[str, Any], enum_by_signature: dict[tuple[Any, ...], str]) -> list[str]:
+    required = set(schema.get("required", []))
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        raise SyncSchemaError(f"{name}: object schema properties must be a mapping")
+
+    fields: list[tuple[str, str | None, dict[str, Any], bool]] = []
+    has_alias = False
+    for raw_name, prop_schema in properties.items():
+        if not isinstance(prop_schema, dict):
+            raise SyncSchemaError(f"{name}.{raw_name}: property schema must be a mapping")
+        py_name, alias = py_identifier(raw_name)
+        has_alias = has_alias or alias is not None
+        fields.append((py_name, alias, prop_schema, raw_name in required))
+
+    lines = [f"class {name}(BaseModel):"]
+    if has_alias:
+        lines.append("    model_config = ConfigDict(populate_by_name=True)")
+        if fields:
+            lines.append("")
+    if not fields:
+        lines.append("    pass")
+        return lines
+
+    for py_name, alias, prop_schema, is_required in fields:
+        type_expr = py_type_expr(prop_schema, is_required, enum_by_signature)
+        default_expr = py_default_expr(is_required, alias)
+        lines.append(f"    {py_name}: {type_expr}{default_expr}")
+    return lines
+
+
+def render_py_alias(name: str, schema: dict[str, Any], enum_by_signature: dict[tuple[Any, ...], str]) -> list[str]:
+    type_expr, nullable = py_type_name(schema, enum_by_signature)
+    if nullable:
+        type_expr = f"{type_expr} | None"
+    return [f"{name} = {type_expr}"]
+
+
+def generate_python_for_contract(input_path: Path, output_path: Path) -> list[str]:
+    try:
+        bundle = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncSchemaError(f"failed to read OpenAPI bundle {input_path}: {exc}") from exc
+
+    schemas = bundle.get("components", {}).get("schemas")
+    if not isinstance(schemas, dict):
+        raise SyncSchemaError(f"{input_path}: missing components.schemas mapping")
+
+    enum_by_signature: dict[tuple[Any, ...], str] = {}
+    for schema_name, schema in schemas.items():
+        if isinstance(schema, dict):
+            signature = enum_signature(schema)
+            if signature is not None:
+                enum_by_signature[signature] = schema_name
+
+    rendered: list[tuple[str, list[str]]] = []
+    exported: list[str] = []
+    needs_datetime = False
+    needs_enum = False
+    needs_any = False
+    needs_base_model = False
+    needs_field = False
+    needs_config = False
+
+    for schema_name, schema in schemas.items():
+        if not isinstance(schema, dict):
+            raise SyncSchemaError(f"{input_path}.{schema_name}: schema must be a mapping")
+        signature = enum_signature(schema)
+        schema_type = schema.get("type")
+        if signature is not None:
+            block = render_py_enum(schema_name, schema)
+            needs_enum = True
+        elif schema_type == "object":
+            block = render_py_model(schema_name, schema, enum_by_signature)
+            needs_base_model = True
+            block_text = "\n".join(block)
+            needs_field = needs_field or "Field(" in block_text
+            needs_config = needs_config or "ConfigDict(" in block_text
+        else:
+            block = render_py_alias(schema_name, schema, enum_by_signature)
+        block_text = "\n".join(block)
+        needs_datetime = needs_datetime or "datetime" in block_text
+        needs_any = needs_any or "Any" in block_text
+        rendered.append((schema_name, block))
+        exported.append(schema_name)
+
+    imports: list[str] = []
+    if needs_datetime:
+        imports.append("from datetime import datetime")
+    if needs_enum:
+        imports.append("from enum import Enum")
+    if needs_any:
+        imports.append("from typing import Any")
+    if needs_base_model:
+        pydantic_names = ["BaseModel"]
+        if needs_config:
+            pydantic_names.append("ConfigDict")
+        if needs_field:
+            pydantic_names.append("Field")
+        imports.append(f"from pydantic import {', '.join(pydantic_names)}")
+
+    content_parts = [py_header(f"generated/openapi/{input_path.name}")]
+    if imports:
+        content_parts.append("\n".join(imports))
+        content_parts.append("\n\n")
+    for index, (_, block) in enumerate(rendered):
+        if index:
+            content_parts.append("\n\n")
+        content_parts.append("\n".join(block))
+    if exported:
+        content_parts.append("\n\n__all__ = [\n")
+        for name in exported:
+            content_parts.append(f"    {name!r},\n")
+        content_parts.append("]\n")
+    else:
+        content_parts.append("\n")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("".join(content_parts), encoding="utf-8")
+    return exported
+
+
+def generate_python(openapi_dir: Path, out_dir: Path, contracts: tuple[str, ...]) -> tuple[list[Path], dict[str, list[str]]]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    exports: dict[str, list[str]] = {}
+    for contract in contracts:
+        input_path = openapi_dir / f"{contract}.bundle.openapi.json"
+        if not input_path.exists():
+            raise SyncSchemaError(f"missing OpenAPI bundle for Python generation: {input_path}")
+        output_path = out_dir / PY_CONTRACT_FILENAMES[contract]
+        exports[contract] = generate_python_for_contract(input_path, output_path)
+        written.append(output_path)
+    return written, exports
+
+
+def write_python_barrel(out_dir: Path, exports: dict[str, list[str]]) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    index_path = out_dir / "__init__.py"
+    content = [py_header("generated/openapi/*.bundle.openapi.json")]
+    all_names: list[str] = []
+    for contract in CONTRACTS:
+        names = exports.get(contract, [])
+        if not names:
+            continue
+        module = PY_CONTRACT_FILENAMES[contract].removesuffix(".py")
+        content.append(f"from .{module} import {', '.join(names)}\n")
+        all_names.extend(names)
+    content.append("\n__all__ = [\n")
+    for name in all_names:
+        content.append(f"    {name!r},\n")
+    content.append("]\n")
+    index_path.write_text("".join(content), encoding="utf-8")
+    return index_path
+
+
+def js_header(source: str) -> str:
+    return (
+        "/**\n"
+        " * AUTO-GENERATED by bin/sync-schema. Do not edit.\n"
+        f" * Source: {source}\n"
+        " */\n\n"
+        "'use strict';\n\n"
+    )
+
+
+def js_identifier(value: str) -> str:
+    candidate = re.sub(r"[^0-9A-Za-z_$]+", "_", value)
+    if not candidate or candidate[0].isdigit():
+        candidate = f"_{candidate}"
+    return candidate
+
+
+def js_schema_descriptor(schema: dict[str, Any], enum_by_signature: dict[tuple[Any, ...], str]) -> dict[str, Any]:
+    schema = merged_allof_schema(schema)
+    descriptor: dict[str, Any] = {}
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str):
+        descriptor["type"] = schema_type
+    if schema.get("format"):
+        descriptor["format"] = schema["format"]
+    if schema.get("nullable") is True:
+        descriptor["nullable"] = True
+
+    signature = enum_signature(schema)
+    if signature and signature in enum_by_signature:
+        descriptor["type"] = schema.get("type", "string")
+        descriptor["enum"] = enum_by_signature[signature]
+        return descriptor
+
+    if schema_type == "array":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            descriptor["items"] = js_schema_descriptor(items, enum_by_signature)
+        return descriptor
+
+    if schema_type == "object":
+        required = schema.get("required")
+        if isinstance(required, list):
+            descriptor["required"] = required
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            descriptor["properties"] = {
+                prop_name: js_schema_descriptor(prop_schema, enum_by_signature)
+                for prop_name, prop_schema in properties.items()
+                if isinstance(prop_schema, dict)
+            }
+        additional_properties = schema.get("additionalProperties")
+        if isinstance(additional_properties, bool):
+            descriptor["additionalProperties"] = additional_properties
+        elif isinstance(additional_properties, dict):
+            descriptor["additionalProperties"] = js_schema_descriptor(additional_properties, enum_by_signature)
+
+    return descriptor
+
+
+def render_js_literal(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def render_js_descriptor(name: str, descriptor: dict[str, Any], enum_names: set[str]) -> str:
+    rendered = render_js_literal(descriptor)
+    for enum_name in sorted(enum_names, key=len, reverse=True):
+        values_literal = json.dumps(f"__{enum_name}Values__")
+        rendered = rendered.replace(values_literal, f"{enum_name}Values")
+    return f"const {name}Schema = deepFreeze({rendered});"
+
+
+def generate_js_for_contract(input_path: Path, output_path: Path) -> list[str]:
+    try:
+        bundle = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncSchemaError(f"failed to read OpenAPI bundle {input_path}: {exc}") from exc
+
+    schemas = bundle.get("components", {}).get("schemas")
+    if not isinstance(schemas, dict):
+        raise SyncSchemaError(f"{input_path}: missing components.schemas mapping")
+
+    enum_by_signature: dict[tuple[Any, ...], str] = {}
+    enum_values: dict[str, list[Any]] = {}
+    for schema_name, schema in schemas.items():
+        if isinstance(schema, dict):
+            signature = enum_signature(schema)
+            if signature is not None:
+                enum_by_signature[signature] = schema_name
+                enum_values[schema_name] = list(signature)
+
+    exports: list[str] = []
+    parts = [
+        js_header(f"generated/openapi/{input_path.name}"),
+        "function deepFreeze(value) {\n"
+        "  if (value && typeof value === 'object' && !Object.isFrozen(value)) {\n"
+        "    Object.freeze(value);\n"
+        "    for (const child of Object.values(value)) {\n"
+        "      deepFreeze(child);\n"
+        "    }\n"
+        "  }\n"
+        "  return value;\n"
+        "}\n",
+    ]
+
+    if enum_values:
+        parts.append("\n")
+    for schema_name, values in enum_values.items():
+        safe_name = js_identifier(schema_name)
+        values_name = f"{safe_name}Values"
+        set_name = f"{safe_name}Set"
+        predicate_name = f"is{safe_name}"
+        parts.append(f"const {values_name} = Object.freeze({render_js_literal(values)});\n")
+        parts.append(f"const {set_name} = new Set({values_name});\n")
+        parts.append(f"function {predicate_name}(value) {{\n")
+        parts.append(f"  return {set_name}.has(value);\n")
+        parts.append("}\n\n")
+        exports.extend([values_name, set_name, predicate_name])
+
+    enum_names = set(enum_values)
+    for schema_name, schema in schemas.items():
+        if not isinstance(schema, dict):
+            raise SyncSchemaError(f"{input_path}.{schema_name}: schema must be a mapping")
+        safe_name = js_identifier(schema_name)
+        descriptor = js_schema_descriptor(schema, enum_by_signature)
+        for enum_name in enum_names:
+            if descriptor.get("enum") == enum_name:
+                descriptor["values"] = f"__{enum_name}Values__"
+        descriptor = add_js_enum_values(descriptor, enum_names)
+        parts.append(render_js_descriptor(safe_name, descriptor, enum_names))
+        parts.append("\n\n")
+        exports.append(f"{safe_name}Schema")
+
+    parts.append("module.exports = {\n")
+    for export_name in exports:
+        parts.append(f"  {export_name},\n")
+    parts.append("};\n")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("".join(parts), encoding="utf-8")
+    return exports
+
+
+def add_js_enum_values(value: Any, enum_names: set[str]) -> Any:
+    if isinstance(value, list):
+        return [add_js_enum_values(item, enum_names) for item in value]
+    if not isinstance(value, dict):
+        return value
+    updated = {key: add_js_enum_values(child, enum_names) for key, child in value.items()}
+    enum_name = updated.get("enum")
+    if isinstance(enum_name, str) and enum_name in enum_names:
+        updated["values"] = f"__{enum_name}Values__"
+    return updated
+
+
+def generate_js(openapi_dir: Path, out_dir: Path, contracts: tuple[str, ...]) -> tuple[list[Path], dict[str, list[str]]]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    exports: dict[str, list[str]] = {}
+    for contract in contracts:
+        input_path = openapi_dir / f"{contract}.bundle.openapi.json"
+        if not input_path.exists():
+            raise SyncSchemaError(f"missing OpenAPI bundle for JS generation: {input_path}")
+        output_path = out_dir / JS_CONTRACT_FILENAMES[contract]
+        exports[contract] = generate_js_for_contract(input_path, output_path)
+        written.append(output_path)
+    return written, exports
+
+
+def write_js_barrel(out_dir: Path, exports: dict[str, list[str]]) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # F4.6 follow-up: flat-namespace collision check. Object.assign() silently
+    # overwrites duplicate keys — a name defined in two contracts would lose
+    # one definition without warning. Fail loudly at build time instead.
+    seen: dict[str, str] = {}
+    for contract in CONTRACTS:
+        for name in exports.get(contract, []):
+            if name in seen and seen[name] != contract:
+                raise SyncSchemaError(
+                    f"duplicate export '{name}' in JS barrel: defined in "
+                    f"both '{seen[name]}' and '{contract}' contracts. "
+                    "Rename one in lib/schemas/ to avoid silent overwrite."
+                )
+            seen[name] = contract
+    index_path = out_dir / "index.js"
+    parts = [js_header("generated/openapi/*.bundle.openapi.json")]
+    for contract in CONTRACTS:
+        names = exports.get(contract, [])
+        if not names:
+            continue
+        module = JS_CONTRACT_FILENAMES[contract].removesuffix(".js")
+        local_name = js_identifier(f"{module}Schemas")
+        parts.append(f"const {local_name} = require('./{module}');\n")
+    parts.append("\nmodule.exports = Object.assign(\n")
+    module_names = [
+        js_identifier(f"{JS_CONTRACT_FILENAMES[contract].removesuffix('.js')}Schemas")
+        for contract in CONTRACTS
+        if exports.get(contract)
+    ]
+    for index, module_name in enumerate(module_names):
+        suffix = "," if index < len(module_names) - 1 else ""
+        parts.append(f"  {module_name}{suffix}\n")
+    parts.append(");\n")
+    index_path.write_text("".join(parts), encoding="utf-8")
+    return index_path
+
+
+def compare_dirs(expected_dir: Path, actual_dir: Path, expected_files: list[Path] | None = None) -> list[str]:
+    diffs: list[str] = []
+    if expected_files is None:
+        expected_rels = {p.relative_to(expected_dir) for p in expected_dir.rglob("*") if p.is_file()}
+    else:
+        expected_rels = {p.relative_to(expected_dir) for p in expected_files}
+
+    for rel in sorted(expected_rels):
+        expected_path = expected_dir / rel
+        actual_path = actual_dir / rel
+        if not actual_path.exists():
+            diffs.append(f"missing: {actual_path}")
+        elif expected_path.read_bytes() != actual_path.read_bytes():
+            diffs.append(f"changed: {actual_path}")
+    return diffs
+
+
+def compare_files(expected_files: list[Path], expected_root: Path, actual_root: Path) -> list[str]:
+    diffs: list[str] = []
+    for expected_path in sorted(expected_files):
+        rel = expected_path.relative_to(expected_root)
+        actual_path = actual_root / rel
+        if not actual_path.exists():
+            diffs.append(f"missing: {actual_path}")
+        elif expected_path.read_bytes() != actual_path.read_bytes():
+            diffs.append(f"changed: {actual_path}")
+    return diffs
+
+
+def run() -> int:
+    args = parse_args()
+    langs = selected_langs(args.lang)
+    contracts = selected_contracts(args.contract)
+
+    specs = load_specs()
+    validate_specs(specs)
+
+    if args.check:
+        with tempfile.TemporaryDirectory(prefix="sync-schema-") as tmp:
+            tmp_root = Path(tmp)
+            tmp_openapi = tmp_root / "generated" / "openapi"
+            expected_openapi = generate_openapi(tmp_openapi, contracts, specs)
+            diffs: list[str] = []
+            if "openapi" in langs:
+                diffs.extend(compare_dirs(tmp_openapi, OPENAPI_OUT_DIR, expected_openapi))
+            if "ts" in langs:
+                tmp_ts_openapi = tmp_root / "dashboard-v3" / "frontend" / "src" / "generated" / "schemas" / "openapi"
+                tmp_ts_root = tmp_root / "dashboard-v3" / "frontend" / "src" / "generated" / "schemas"
+                expected_ts = generate_ts(tmp_openapi, tmp_ts_openapi, contracts)
+                expected_barrel = write_ts_barrel(tmp_ts_root)
+                diffs.extend(compare_files(expected_ts, tmp_ts_openapi, TS_OPENAPI_OUT_DIR))
+                if args.contract is None:
+                    diffs.extend(compare_files([expected_barrel], tmp_ts_root, TS_SCHEMA_OUT_DIR))
+            if "python" in langs:
+                tmp_py_root = tmp_root / "dashboard-v3" / "backend" / "generated" / "schemas"
+                expected_py, expected_exports = generate_python(tmp_openapi, tmp_py_root, contracts)
+                diffs.extend(compare_files(expected_py, tmp_py_root, PY_SCHEMA_OUT_DIR))
+                if args.contract is None:
+                    expected_barrel = write_python_barrel(tmp_py_root, expected_exports)
+                    diffs.extend(compare_files([expected_barrel], tmp_py_root, PY_SCHEMA_OUT_DIR))
+            if "js" in langs:
+                tmp_js_root = tmp_root / "core" / "generated" / "schemas"
+                expected_js, expected_exports = generate_js(tmp_openapi, tmp_js_root, contracts)
+                diffs.extend(compare_files(expected_js, tmp_js_root, JS_SCHEMA_OUT_DIR))
+                if args.contract is None:
+                    expected_barrel = write_js_barrel(tmp_js_root, expected_exports)
+                    diffs.extend(compare_files([expected_barrel], tmp_js_root, JS_SCHEMA_OUT_DIR))
+            if diffs:
+                print("sync-schema check failed:")
+                for diff in diffs:
+                    print(f"  {diff}")
+                return 1
+            print("sync-schema check OK")
+            return 0
+
+    if args.clean and "openapi" in langs and OPENAPI_OUT_DIR.exists():
+        shutil.rmtree(OPENAPI_OUT_DIR)
+    if args.clean and "ts" in langs and TS_OPENAPI_OUT_DIR.exists():
+        shutil.rmtree(TS_OPENAPI_OUT_DIR)
+    if args.clean and "python" in langs and PY_SCHEMA_OUT_DIR.exists():
+        shutil.rmtree(PY_SCHEMA_OUT_DIR)
+    if args.clean and "js" in langs and JS_SCHEMA_OUT_DIR.exists():
+        shutil.rmtree(JS_SCHEMA_OUT_DIR)
+
+    # Always regenerate OpenAPI bundles before language generation so downstream
+    # artifacts use current schemas.
+    written: list[Path] = []
+    if "openapi" in langs or "ts" in langs or "python" in langs or "js" in langs:
+        openapi_written = generate_openapi(OPENAPI_OUT_DIR, contracts, specs)
+        if "openapi" in langs:
+            written.extend(openapi_written)
+    if "ts" in langs:
+        written.extend(generate_ts(OPENAPI_OUT_DIR, TS_OPENAPI_OUT_DIR, contracts))
+        if args.contract is None:
+            written.append(write_ts_barrel(TS_SCHEMA_OUT_DIR))
+    if "python" in langs:
+        py_written, py_exports = generate_python(OPENAPI_OUT_DIR, PY_SCHEMA_OUT_DIR, contracts)
+        written.extend(py_written)
+        if args.contract is None:
+            written.append(write_python_barrel(PY_SCHEMA_OUT_DIR, py_exports))
+    if "js" in langs:
+        js_written, js_exports = generate_js(OPENAPI_OUT_DIR, JS_SCHEMA_OUT_DIR, contracts)
+        written.extend(js_written)
+        if args.contract is None:
+            written.append(write_js_barrel(JS_SCHEMA_OUT_DIR, js_exports))
+
+    for path in written:
+        print(path.relative_to(REPO_ROOT))
+    return 0
+
+
+def main() -> int:
+    try:
+        return run()
+    except SyncSchemaError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

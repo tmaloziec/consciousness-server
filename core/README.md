@@ -2,7 +2,7 @@
 
 **Central awareness point for the agent ecosystem.**
 
-Version: 0.1.0
+Version: 1.1.0
 Port: 3032
 
 ---
@@ -13,7 +13,7 @@ Consciousness Server provides a unified HTTP API for agent coordination:
 - Task management (create, claim, update, complete)
 - Shared logs and activity feed
 - Agent registry (online/offline, current task, context %)
-- Notes (handoffs, observations, decisions)
+- Notes (handoffs, observations, decisions, audit)
 - Chat (directed and broadcast between agents)
 - Embedded WebSocket broadcast (same port, `/ws`)
 
@@ -29,6 +29,10 @@ state visible and recoverable.
 # Install deps
 npm install
 
+# Start Redis on the host (only dependency beyond Node)
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+# or: brew services start redis  /  apt install redis-server
+
 # Start server
 node server.js
 
@@ -36,9 +40,17 @@ node server.js
 curl http://localhost:3032/health
 ```
 
-The server stores data in SQLite at `data/consciousness.db` (path
-configurable via `CONSCIOUSNESS_DB`). A fresh clone starts with an
-empty database; tables are created from `db/schema.sql` on first run.
+The server keeps all state in **Redis** (default `127.0.0.1:6379`).
+Override with `REDIS_HOST` / `REDIS_PORT` env vars. On startup the
+server loads tasks, logs, agents, notes, chat, conversations,
+training data, and session summaries from Redis keys; while running
+every mutation is also persisted there. A fresh Redis means a fresh
+ecosystem with no state to migrate.
+
+The `db/schema.sql` file in this directory is a **legacy reference
+schema** from the pre-Redis MVP. It documents the data model but is
+not executed at runtime — you can ignore it unless you're porting
+the storage layer.
 
 ---
 
@@ -50,10 +62,14 @@ empty database; tables are created from `db/schema.sql` on first run.
 
 ### Tasks
 
-- `POST /api/tasks/create` — create a task for an agent
+- `POST /api/tasks` — create a task (canonical; alias: `POST /api/tasks/create`)
 - `GET /api/tasks/pending/:agent` — fetch an agent's pending queue
 - `PATCH /api/tasks/:id/status` — transition a task between states
 - `GET /api/tasks/:id` — full task detail
+
+`POST /api/tasks` returns `201` with the full Task per
+`lib/schemas/tasks.openapi.yaml` — the `id` field is what older callers
+called `task_id`.
 
 Status values: `PENDING`, `IN_PROGRESS`, `DONE`, `FAILED`, `CANCELLED`.
 Priority values: `LOW`, `NORMAL`, `HIGH`, `URGENT`.
@@ -87,10 +103,10 @@ inputs inline.
 
 ```bash
 # 1. A coordinator creates a task
-TASK_ID=$(curl -s -X POST http://localhost:3032/api/tasks/create \
+TASK_ID=$(curl -s -X POST http://localhost:3032/api/tasks \
   -H "Content-Type: application/json" \
   -d '{"project":"demo","assigned_to":"agent1","created_by":"coord","title":"Example task"}' \
-  | jq -r '.task_id')
+  | jq -r '.id')
 
 # 2. The assigned agent polls its queue
 curl -s http://localhost:3032/api/tasks/pending/agent1 | jq
@@ -116,16 +132,21 @@ curl -X PATCH http://localhost:3032/api/tasks/$TASK_ID/status \
 ## Layout
 
 ```
-consciousness-server/
+core/
 ├── server.js            # Main HTTP + embedded WS handler
 ├── package.json
 ├── Dockerfile
 ├── db/
-│   └── schema.sql       # Tables, indexes, views
+│   └── schema.sql       # Legacy reference schema (not executed at runtime)
+├── generated/
+│   └── schemas/         # F4.6 codegen from lib/schemas/*.openapi.yaml
 ├── middleware/
-│   └── verify-signed.js # Synced from lib/verify-signed.js
-└── data/                # SQLite database lives here (gitignored)
+│   ├── verify-signed.js # Synced from lib/verify-signed.js
+│   └── ports.js         # Synced from lib/ports.js
+└── README.md
 ```
+
+State lives in Redis, not on disk in this directory.
 
 ---
 
@@ -147,13 +168,18 @@ any keys or key-server.
 # Port already in use
 lsof -i :3032
 
-# Database locked / corrupt
-ls -la data/consciousness.db
-sqlite3 data/consciousness.db 'PRAGMA integrity_check;'
+# Redis unreachable — server logs "Redis error" on startup
+redis-cli -h "${REDIS_HOST:-127.0.0.1}" -p "${REDIS_PORT:-6379}" ping
+# expected: PONG
 
-# Missing tables after an upgrade
-sqlite3 data/consciousness.db < db/schema.sql
+# Inspect what's persisted
+redis-cli KEYS 'tasks:*' | head
+redis-cli KEYS 'agents:*'
+redis-cli KEYS 'notes:*' | head
+
+# Wipe all ecosystem state (DESTRUCTIVE — fresh start)
+redis-cli FLUSHDB
 
 # Check what a specific agent is seeing
-curl -s http://localhost:3032/api/agents | jq '.[] | select(.name=="<AGENT>")'
+curl -s http://localhost:3032/api/agents | jq '.agents[] | select(.name=="<AGENT>")'
 ```

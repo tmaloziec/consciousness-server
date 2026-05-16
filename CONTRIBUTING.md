@@ -83,7 +83,7 @@ For non-trivial changes, please describe your testing in the PR description.
 ## Reporting Bugs / Security Issues
 
 - **Bugs**: Open an issue with reproduction steps, environment (OS, Python version, Ollama version, model), and expected vs. actual behavior.
-- **Security vulnerabilities**: Do **not** open a public issue. Contact the maintainer privately via [github.com/tmaloziec](https://github.com/tmaloziec) with details. We aim to respond within 7 days.
+- **Security vulnerabilities**: Do **not** open a public issue. Contact the maintainer privately via [github.com/build-on-ai](https://github.com/build-on-ai) with details. We aim to respond within 7 days.
 
 ## Pull Request Checklist
 

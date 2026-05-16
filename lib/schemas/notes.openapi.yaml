@@ -1,0 +1,286 @@
+openapi: 3.0.3
+info:
+  title: Consciousness Server Notes API
+  version: 0.2.0-draft
+  description: Draft contract for delete-allowed, mutate-not-allowed notes used by BuildOnAI agents. Current core does not support PATCH /notes/{id}; mutable notes are intentionally omitted from paths. Schema describes the TARGET contract. Filters and enums marked NOT YET ENFORCED are validated client-side only; core parity tracked as F4.5.6.
+servers:
+  - url: /api
+    description: Same-origin
+tags:
+  - name: notes
+    description: Operational memory entries
+paths:
+  /notes:
+    get:
+      tags: [notes]
+      operationId: listNotes
+      summary: List notes
+      description: Results ordered by created_at DESC, ties broken by id.
+      parameters:
+        - name: agent
+          in: query
+          schema:
+            type: string
+            minLength: 1
+          description: Return only notes created by this agent.
+          example: CDX
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/NoteType'
+          description: Return only notes of this type.
+          example: decision
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Maximum number of notes to return.
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of matching notes to skip before returning results.
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Return notes created strictly after this timestamp. NOT YET ENFORCED by core (F4.5.6).
+          example: '2026-05-10T00:00:48.525Z'
+        - name: tags
+          in: query
+          schema:
+            type: string
+          description: Comma-separated tag filter. NOT YET ENFORCED by core (F4.5.6).
+          example: f4.5.1,openapi
+      responses:
+        '200':
+          description: Matching notes and pagination metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, pagination, notes]
+                properties:
+                  total:
+                    type: integer
+                    minimum: 0
+                    description: Total number of notes matching the filters.
+                  pagination:
+                    $ref: './_common.openapi.yaml#/components/schemas/Pagination'
+                  notes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Note'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [notes]
+      operationId: createNote
+      summary: Create note
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteCreate'
+      responses:
+        '201':
+          description: Note created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /notes/{id}:
+    get:
+      tags: [notes]
+      operationId: getNote
+      summary: Get note by ID
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      responses:
+        '200':
+          description: Note details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [notes]
+      operationId: deleteNote
+      summary: Delete note by ID
+      parameters:
+        - $ref: '#/components/parameters/NoteId'
+      responses:
+        '200':
+          description: Note deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, message, note_id]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  message:
+                    type: string
+                    example: Note deleted
+                  note_id:
+                    type: string
+                    format: uuid
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    NoteId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Note identifier.
+  responses:
+    BadRequest:
+      description: Request validation failed.
+      content:
+        application/json:
+          schema:
+            $ref: './_common.openapi.yaml#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Note was not found.
+      content:
+        application/json:
+          schema:
+            $ref: './_common.openapi.yaml#/components/schemas/ErrorResponse'
+  schemas:
+    NoteType:
+      type: string
+      enum:
+        - observation
+        - decision
+        - blocker
+        - idea
+        - handoff
+        - session_end
+        - audit
+    NoteVisibility:
+      type: string
+      description: Visibility marker for note consumers. NOT YET ENFORCED by core (F4.5.6).
+      enum:
+        - all
+        - agents
+        - user
+    Note:
+      type: object
+      required:
+        - id
+        - agent
+        - type
+        - title
+        - content
+        - tags
+        - visibility
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent:
+          type: string
+        type:
+          $ref: '#/components/schemas/NoteType'
+        title:
+          type: string
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        visibility:
+          $ref: '#/components/schemas/NoteVisibility'
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    NoteCreate:
+      type: object
+      description: Create-note target schema. Unknown-field rejection is NOT YET ENFORCED by core (F4.5.6).
+      required:
+        - agent
+        - type
+        - title
+      additionalProperties: false
+      properties:
+        agent:
+          type: string
+        type:
+          $ref: '#/components/schemas/NoteType'
+        title:
+          type: string
+        content:
+          type: string
+          default: ''
+        tags:
+          type: array
+          items:
+            type: string
+          default: []
+        visibility:
+          allOf:
+            - $ref: '#/components/schemas/NoteVisibility'
+          default: all
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+    NotePatch:
+      type: object
+      description: Reserved for a future mutable notes endpoint; current core treats notes as mutate-not-allowed.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        visibility:
+          $ref: '#/components/schemas/NoteVisibility'
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true

@@ -28,7 +28,7 @@ You can use the free AGPLv3 license if you:
 
 Open an issue or contact the maintainer:
 
-- **GitHub:** [@tmaloziec](https://github.com/tmaloziec)
+- **GitHub:** [@build-on-ai](https://github.com/build-on-ai)
 - **Repository:** [github.com/build-on-ai/consciousness-server](https://github.com/build-on-ai/consciousness-server)
 - **Email:** buildonai.tm@gmail.com
 

@@ -1,0 +1,7 @@
+# Python dependencies for bin/ tooling (sync-schema, preflight helpers).
+# Install: pip install -r bin/requirements.txt
+#
+# Pinned to a known-working lower bound, not upper-pinned so distros and
+# venvs can pick up minor/patch updates without churning this file.
+
+PyYAML>=6.0

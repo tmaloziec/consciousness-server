@@ -1,6 +1,6 @@
 # Contributor License Agreement (CLA)
 
-Thank you for your interest in contributing to **consciousness-server**, maintained by Tomasz Maloziec ("the Maintainer").
+Thank you for your interest in contributing to **consciousness-server**, maintained by BuildOnAI ("the Maintainer").
 
 This Contributor License Agreement ("Agreement") sets out the terms under which intellectual property is contributed to consciousness-server. It protects you, the Maintainer, and the users of consciousness-server. By submitting a contribution (e.g. via Pull Request), you accept this Agreement.
 
@@ -12,7 +12,7 @@ You only need to accept this Agreement once. Future contributions are covered au
 
 - **"You"** means the individual copyright owner submitting a Contribution, or the legal entity authorized by such individual.
 - **"Contribution"** means any original work of authorship, including modifications to existing work, that you intentionally submit to consciousness-server (e.g. via Pull Request, issue patch, email, etc.).
-- **"Maintainer"** means Tomasz Maloziec, the copyright holder and project lead of consciousness-server.
+- **"Maintainer"** means BuildOnAI, the copyright holder and project lead of consciousness-server.
 
 ## 2. Grant of Copyright License
 
@@ -55,7 +55,7 @@ You agree to notify the Maintainer of any facts or circumstances of which you be
 
 When you open a Pull Request, the [CLA Assistant bot](https://cla-assistant.io/) will automatically prompt you to accept this Agreement with a single click on the PR. Your acceptance is recorded and applies to all future contributions.
 
-If you have questions about this Agreement, please open an issue or contact the Maintainer at [github.com/tmaloziec](https://github.com/tmaloziec).
+If you have questions about this Agreement, please open an issue or contact the Maintainer at [github.com/build-on-ai](https://github.com/build-on-ai).
 
 ---
 

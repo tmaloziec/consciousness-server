@@ -1,0 +1,38 @@
+openapi: 3.0.3
+info:
+  title: Consciousness Server Common API Components
+  version: 0.1.0-draft
+  description: Shared OpenAPI components for Consciousness Server contracts.
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          nullable: true
+    Pagination:
+      type: object
+      required:
+        - limit
+        - offset
+        - returned
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+        offset:
+          type: integer
+          minimum: 0
+        returned:
+          type: integer
+          minimum: 0
+        next_offset:
+          type: integer
+          minimum: 0
+          nullable: true

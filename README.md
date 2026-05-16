@@ -12,6 +12,30 @@ directly. You bring the agents; the ecosystem gives them a shared
 brain.
 
 Authoritative structure and semantics: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Per-release changes and v1.0.0 → v1.1.0 migration: [`CHANGELOG.md`](CHANGELOG.md).
+
+## What's new in v1.1.0
+
+- **F4.6 contracts + codegen pipeline.** `lib/schemas/*.openapi.yaml`
+  is the single source of truth for chat / notes / tasks / common
+  schemas. `bin/sync-schema` (Python, deps in `bin/requirements.txt`)
+  bundles each contract and emits Node consumers in
+  `core/generated/schemas/`. Edit the YAML, run `bin/sync-schema`,
+  done — no more hand-maintained type duplication.
+- **`POST /api/tasks`** is now the canonical task-creation route
+  (matches `ARCHITECTURE.md` + OpenAPI). The legacy
+  `POST /api/tasks/create` still works as an alias.
+- **`POST /api/tasks` and `POST /api/notes` return the full object**
+  per OpenAPI, not just `{id, created_at}`.
+- **`/health`** now distinguishes `chat_messages` (CS core) from
+  `conversation_embeddings` (semantic-search), with an explicit
+  `semantic_search` status field (`ok | misconfigured | timeout |
+  unreachable`). **Note:** this is a breaking change for monitoring
+  that read `memory.conversations` — see [`CHANGELOG.md`](CHANGELOG.md).
+- **Mentions** now resolve against the live agent registry —
+  `@CC-TESTER`, `@agent-001`, any registered name works (no more
+  hardcoded allowlist).
+- **`NoteType` enum** gains `audit`.
 
 ## Prerequisites
 
@@ -23,6 +47,17 @@ Authoritative structure and semantics: [`ARCHITECTURE.md`](ARCHITECTURE.md).
   `host.docker.internal` alias. Without Ollama running, `/api/search`
   responds with a precise `503 ollama_unreachable` instead of
   pretending to work.
+
+Only if you plan to regenerate schemas with `bin/sync-schema` (v1.1.0
+F4.6 codegen pipeline), you also need Python 3.9+ and the deps in
+`bin/requirements.txt`:
+
+```bash
+pip install -r bin/requirements.txt   # currently just PyYAML
+```
+
+You don't need this to run the stack — only to edit `lib/schemas/*.yaml`
+and regenerate the artifacts in `core/generated/` and `generated/openapi/`.
 
 There's a one-shot check script that verifies everything for you:
 
@@ -256,7 +291,7 @@ Dual-licensed:
 - **Commercial License** for organisations that cannot accept the
   AGPL obligations. See [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
 
-Copyright (C) Tomasz Małoziec.
+Copyright (C) BuildOnAI.
 
 ## Security
 

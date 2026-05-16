@@ -5,7 +5,19 @@ and semantics of the `consciousness-server` ecosystem. If the code
 ever drifts from this document, **the code is wrong and must be
 fixed** — the document is not updated to match the drift.
 
-Version: v1 (public release). Last structural review: 2026-04-22.
+Version: v1.1 (public release). Last structural review: 2026-05-16.
+
+What changed in v1.1 that affects this document:
+- New `lib/schemas/*.openapi.yaml` is the canonical source for chat,
+  notes, tasks, and common schemas; consumers in this repo and in
+  downstream apps are generated from it via `bin/sync-schema`.
+- `POST /api/tasks` documented below is the canonical route as of v1.1
+  (legacy `POST /api/tasks/create` retained as alias).
+- `/health` payload split `memory.conversations` into
+  `memory.chat_messages` + `memory.conversation_embeddings` and added a
+  top-level `semantic_search` status field.
+
+Per-release changes and migration: [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

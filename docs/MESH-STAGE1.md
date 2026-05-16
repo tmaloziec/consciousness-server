@@ -70,7 +70,7 @@ curl -s http://localhost:3045/health | jq
 ../bin/ingest-document ../README.md --type txt
 ```
 
-### Run in an existing ecosystem (laptop / ADAX / HP)
+### Run in an existing ecosystem (multi-host fleet)
 
 ```bash
 git -C /path/to/consciousness-server pull origin main
