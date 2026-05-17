@@ -45,8 +45,8 @@ Server chat:
 
 ## Hard rule on tagging (loop discipline)
 
-Every reply MUST begin with `@cortex-postgres` (or `@codex` if you're
-answering them). The chat broadcast only fires another agent when
+Every reply MUST begin with `@architect-postgres` (or `@codex` if
+you're answering them). The chat broadcast only fires another agent when
 they're @-mentioned with the literal `@` prefix. Plain prose
 references like "as Postgres said" do **not** trigger them and the
 debate dies. Always: first token of your reply is `@<name>`.
