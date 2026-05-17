@@ -1,0 +1,76 @@
+#!/bin/bash
+# backup-redis-before-upgrade — snapshot Redis state before swapping server code.
+#
+# Forces a Redis RDB snapshot (BGSAVE), waits until it completes, then copies
+# the resulting dump file to a target directory you control. No sudo required:
+# the dump path is read from Redis itself via CONFIG GET.
+#
+# Usage:
+#   backup-redis-before-upgrade <target_dir> [redis-host] [redis-port]
+#
+# Default redis-host: 127.0.0.1
+# Default redis-port: 6379
+#
+# Output: <target_dir>/dump-YYYYMMDD-HHMM.rdb
+#
+# Requires: redis-cli
+
+set -euo pipefail
+
+TARGET_DIR="${1:?usage: backup-redis-before-upgrade <target_dir> [host] [port]}"
+HOST="${2:-127.0.0.1}"
+PORT="${3:-6379}"
+
+if ! command -v redis-cli >/dev/null 2>&1; then
+  echo "redis-cli is required but not installed" >&2
+  exit 1
+fi
+
+RCLI=(redis-cli -h "$HOST" -p "$PORT")
+
+# Sanity check connectivity.
+if ! "${RCLI[@]}" PING >/dev/null 2>&1; then
+  echo "cannot reach redis at $HOST:$PORT" >&2
+  exit 1
+fi
+
+mkdir -p "$TARGET_DIR"
+
+# Capture pre-state for reference.
+KEYS_BEFORE="$("${RCLI[@]}" DBSIZE)"
+echo "redis $HOST:$PORT has $KEYS_BEFORE keys"
+
+# Trigger background save.
+echo "starting BGSAVE..."
+"${RCLI[@]}" BGSAVE
+
+# Wait until BGSAVE finishes. Poll rdb_bgsave_in_progress in INFO persistence.
+while :; do
+  in_progress="$("${RCLI[@]}" INFO persistence | grep -E '^rdb_bgsave_in_progress:' | cut -d: -f2 | tr -d '\r')"
+  if [ "$in_progress" = "0" ]; then
+    break
+  fi
+  sleep 1
+done
+echo "BGSAVE finished"
+
+# Locate the dump file using Redis' own config (no hardcoded path).
+DUMP_DIR="$("${RCLI[@]}" CONFIG GET dir | tail -1)"
+DUMP_NAME="$("${RCLI[@]}" CONFIG GET dbfilename | tail -1)"
+DUMP_PATH="${DUMP_DIR}/${DUMP_NAME}"
+
+if [ ! -r "$DUMP_PATH" ]; then
+  echo "dump path not readable by current user: $DUMP_PATH" >&2
+  echo "(common on production setups where redis writes as the 'redis' user;" >&2
+  echo " run this script as that user, or copy with sudo, or use --rdb on a replica.)" >&2
+  exit 2
+fi
+
+STAMP="$(date +%Y%m%d-%H%M)"
+OUT_PATH="${TARGET_DIR%/}/dump-${STAMP}.rdb"
+cp "$DUMP_PATH" "$OUT_PATH"
+
+echo ""
+echo "saved: $OUT_PATH ($(du -h "$OUT_PATH" | cut -f1))"
+echo "keys captured: $KEYS_BEFORE"
+echo "to restore later: stop redis, replace its dump.rdb with this file, start redis."
