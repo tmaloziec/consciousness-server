@@ -1,6 +1,6 @@
 {
   "name": "consciousness-server",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "Consciousness Server - Central awareness point for agent ecosystems",
   "main": "server.js",
   "scripts": {
