@@ -1,11 +1,9 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
- * Consciousness Server (Memory Server) - MVP
- * Central awareness point for Ecosystem ecosystem
- *
- * Consciousness Server
- * Date: 2025-12-30
- * Version: 0.1.0 MVP (in-memory)
+ * consciousness-server (core) — tasks, notes, chat, memory, agent and
+ * skills registries, embedded WebSocket. Authoritative structure:
+ * ../ARCHITECTURE.md §4.1. Version comes from ./package.json.
  */
 
 const express = require('express');
