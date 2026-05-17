@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# preflight-bare-metal — host readiness checks for the
+# `node core/server.js` install path. The Docker preflight lives at
+# bin/preflight and checks a different set of things (docker, ollama,
+# compose v2).
+#
+# Usage:  bin/preflight-bare-metal
+#
+# Exit 0  — every required check passed (warnings may print).
+# Exit 1  — at least one required check failed; the line tells you
+#           which env var or dependency to fix, then re-run.
+#
+# Reads .env from the repo root if present so checks see the same
+# values the server will see at runtime. Does not install, modify,
+# or write anything.
+
+set -u
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="$REPO_ROOT/.env"
+
+RED=$'\033[0;31m'
+YEL=$'\033[0;33m'
+GRN=$'\033[0;32m'
+RST=$'\033[0m'
+
+WARN_COUNT=0
+FAILED=0
+
+ok()   { printf '%s  PASS%s   %s\n' "$GRN" "$RST" "$1"; }
+warn() { printf '%s  WARN%s   %s\n' "$YEL" "$RST" "$1"; WARN_COUNT=$((WARN_COUNT + 1)); }
+fail() { printf '%s  FAIL%s   %s\n' "$RED" "$RST" "$1"; FAILED=1; }
+fix()  { printf '         %sfix:%s %s\n' "$YEL" "$RST" "$1"; }
+
+echo 'consciousness-server bare-metal preflight'
+echo '-----------------------------------------'
+
+# --- load .env (best-effort) --------------------------------------
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  set -a; . "$ENV_FILE"; set +a
+  ok ".env loaded from $ENV_FILE"
+else
+  warn ".env not found at $ENV_FILE — checks will use in-code defaults"
+  fix  "cp .env.example .env && \$EDITOR .env"
+fi
+
+# Resolve effective values (mirror the fallbacks in core/server.js).
+HOST_VAL="${CONSCIOUSNESS_HOST:-0.0.0.0}"
+PORT_VAL="${PORT:-3032}"
+AGENTS_DIR_VAL="${AGENTS_DIR:-./agents}"
+SEMANTIC_URL_VAL="${SEMANTIC_SEARCH_URL:-http://localhost:3037}"
+REDIS_HOST_VAL="${REDIS_HOST:-127.0.0.1}"
+REDIS_PORT_VAL="${REDIS_PORT:-6379}"
+
+# --- node ----------------------------------------------------------
+# Dockerfiles ship node:20-alpine; require 20+ for parity.
+if command -v node >/dev/null 2>&1; then
+  NODE_VER="$(node --version | sed 's/^v//')"
+  NODE_MAJOR="${NODE_VER%%.*}"
+  if [ "${NODE_MAJOR:-0}" -ge 20 ] 2>/dev/null; then
+    ok "node $NODE_VER (>= 20 required)"
+  else
+    fail "node $NODE_VER is older than the supported v20 baseline"
+    fix  "install Node.js 20 LTS — https://nodejs.org/en/download"
+  fi
+else
+  fail "node not installed"
+  fix  "install Node.js 20 LTS — https://nodejs.org/en/download"
+fi
+
+# --- redis ---------------------------------------------------------
+# Hard dependency: core/server.js:50-62 connects unconditionally.
+if command -v redis-cli >/dev/null 2>&1; then
+  if redis-cli -h "$REDIS_HOST_VAL" -p "$REDIS_PORT_VAL" ping 2>/dev/null | grep -q PONG; then
+    ok "redis reachable at ${REDIS_HOST_VAL}:${REDIS_PORT_VAL}"
+  else
+    fail "redis not reachable at ${REDIS_HOST_VAL}:${REDIS_PORT_VAL}"
+    fix  "start redis (sudo systemctl start redis-server) or fix REDIS_HOST/REDIS_PORT in .env"
+  fi
+else
+  warn "redis-cli not installed — skipping reachability check"
+  fix  "install redis-tools to enable the check (server still needs Redis at runtime)"
+fi
+
+# --- listener port -------------------------------------------------
+# core/server.js:4034 calls server.listen(PORT, HOST); refuse to start
+# in advance if something else already owns the port.
+if command -v ss >/dev/null 2>&1; then
+  if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT_VAL}$"; then
+    fail "port ${PORT_VAL} is already in use on ${HOST_VAL}"
+    fix  "free it, set PORT in .env, or edit ports.yaml"
+  else
+    ok "port ${PORT_VAL} is free"
+  fi
+else
+  warn "ss not available — skipping port-in-use check"
+fi
+
+# --- AGENTS_DIR ----------------------------------------------------
+# core/server.js:3695. Resolve relative paths against the repo root
+# (matches what node will see when started from WorkingDirectory).
+case "$AGENTS_DIR_VAL" in
+  /*) AGENTS_PATH="$AGENTS_DIR_VAL" ;;
+  *)  AGENTS_PATH="$REPO_ROOT/$AGENTS_DIR_VAL" ;;
+esac
+
+if [ -d "$AGENTS_PATH" ]; then
+  AGENT_COUNT="$(find "$AGENTS_PATH" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l)"
+  if [ "$AGENT_COUNT" -ge 1 ]; then
+    ok "AGENTS_DIR=$AGENTS_DIR_VAL exists and holds $AGENT_COUNT role file(s)"
+  else
+    fail "AGENTS_DIR=$AGENTS_DIR_VAL exists but contains no *.md role files"
+    fix  "drop at least one role file in there, or point AGENTS_DIR at the bundled ./agents"
+  fi
+else
+  fail "AGENTS_DIR=$AGENTS_DIR_VAL does not exist (resolved to $AGENTS_PATH)"
+  fix  "create the directory or set AGENTS_DIR=./agents in .env"
+fi
+
+# --- semantic-search reachability ---------------------------------
+# core/server.js:624 — health probe uses this URL.
+if command -v curl >/dev/null 2>&1; then
+  if curl -sf --max-time 3 -o /dev/null "$SEMANTIC_URL_VAL/health"; then
+    ok "semantic-search responded at $SEMANTIC_URL_VAL/health"
+  else
+    warn "semantic-search did not respond at $SEMANTIC_URL_VAL/health"
+    fix  "start the semantic-search block, or update SEMANTIC_SEARCH_URL"
+  fi
+else
+  warn "curl not installed — skipping SEMANTIC_SEARCH_URL probe"
+fi
+
+echo
+if [ "$FAILED" -ne 0 ]; then
+  printf '%sFAIL%s — fix the lines above and re-run.\n' "$RED" "$RST"
+  exit 1
+fi
+if [ "$WARN_COUNT" -gt 0 ]; then
+  printf '%sPASS with %d warning(s)%s — review and decide before launch.\n' "$YEL" "$WARN_COUNT" "$RST"
+else
+  printf '%sPASS%s — host looks ready.\n' "$GRN" "$RST"
+fi
+exit 0
