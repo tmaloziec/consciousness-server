@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax:
+    name: Syntax check (Node + Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: node --check on each Node service
+        run: |
+          node --check core/server.js
+          node --check key-server/server.js
+          node --check memory-server/server.js
+      - name: py_compile on each Python service
+        run: |
+          python3 -m py_compile semantic-search/server.py
+          python3 -m py_compile machines-server/server.py
+          python3 -m py_compile test-runner/server.py
+          python3 -m py_compile git-workflow/server.py
+
+  schema-sync:
+    name: Schema artifacts in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r bin/requirements.txt
+      - name: bin/sync-schema --check
+        run: bin/sync-schema --check
+
+  docker-validate:
+    name: Docker Compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config (default profile)
+        run: docker compose -f deploy/docker-compose.yml config > /dev/null
+      - name: docker compose config (--profile full)
+        run: docker compose -f deploy/docker-compose.yml --profile full config > /dev/null
+      - name: docker compose config (--profile mesh)
+        run: docker compose -f deploy/docker-compose.yml --profile mesh config > /dev/null
+
+  secret-scan:
+    name: Secret leak guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for known private tokens (best-effort)
+        run: |
+          set -e
+          # Anthropic/OpenAI/Google/GitHub/Slack token shapes and PEM
+          # headers. Placeholders like `sk-ant-...` in docs do not
+          # trip the alphanumeric-length guard.
+          patterns='sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}|ghp_[A-Za-z0-9]{36}|xox[abp]-[A-Za-z0-9-]+|BEGIN RSA PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY'
+          if grep -RInE "$patterns" \
+              --exclude-dir=.git \
+              --exclude-dir=.github \
+              --exclude-dir=node_modules \
+              --exclude-dir=generated \
+              --exclude-dir=deploy \
+              --exclude=package-lock.json \
+              . ; then
+            echo "::error::Possible secret found in the repo"
+            exit 1
+          fi
+          echo "No secret-shaped strings found."
