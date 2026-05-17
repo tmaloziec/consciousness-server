@@ -3,8 +3,8 @@ FROM node:20-alpine
 WORKDIR /app
 RUN apk add --no-cache curl
 
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY server.js ./
 COPY db ./db
