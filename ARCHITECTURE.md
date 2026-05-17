@@ -40,11 +40,16 @@ on a trusted LAN; it is not a public multi-tenant service.
 ```
 consciousness-server/              ← repo root (after git clone)
 │
-├── agents/                        ← byty: character profiles (operator edit)
-│   ├── designer.md                ·   one .md per role
-│   ├── observer.md
+├── agents/                        ← byty: character profile templates (operator edit)
+│   ├── designer.md                ·   one .md per role; edit/rename/replace
+│   ├── observer.md                ·     to match your fleet
 │   ├── validator.md
-│   └── writer.md
+│   ├── writer.md
+│   ├── decider.md
+│   ├── tester.md
+│   ├── codex.md
+│   ├── architect-postgres.md      ·   architecture-debate pair
+│   └── architect-redis.md
 │
 ├── skills/                        ← worek: skill definitions (operator edit)
 │   ├── search-memory.md
@@ -404,7 +409,7 @@ The document leads the code.
 - ChromaDB auto-embedding only for summaries
 - ed25519 signed-request protocol with nonce anti-replay
 - `bin/preflight`, `bin/launch-agent`, `bin/sign-request`
-- Four example agent roles, two example skills
+- Nine example agent role templates, two example skills
 
 ### 7.2 What is NOT in v1 (explicitly deferred to v2+)
 

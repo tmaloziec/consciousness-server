@@ -244,10 +244,14 @@ pair registered with key-server. Coordination happens through
 shared Redis state and the chat channel on consciousness-server,
 not direct IPC.
 
-Character profiles are plain Markdown files in `agents/`. Four
-examples ship — `designer.md`, `observer.md`, `validator.md`,
-`writer.md`. Add more by dropping new `.md` files; CS reloads on
-first missing lookup.
+Character profiles are plain Markdown files in `agents/`. Nine
+starting templates ship — four general-purpose roles
+(`designer.md`, `observer.md`, `validator.md`, `writer.md`), three
+workflow roles (`decider.md`, `tester.md`, `codex.md`), and two
+architecture-debate roles (`architect-postgres.md`,
+`architect-redis.md`). They are **templates, not finished agents** —
+edit, rename, or replace them to match your fleet. Add more by
+dropping new `.md` files; CS reloads on first missing lookup.
 
 Full guide: [`docs/MULTI-AGENT.md`](docs/MULTI-AGENT.md).
 
