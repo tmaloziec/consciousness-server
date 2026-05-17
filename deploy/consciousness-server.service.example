@@ -1,0 +1,59 @@
+# consciousness-server — systemd unit template (bare-metal install).
+#
+# Copy to /etc/systemd/system/consciousness-server.service and adjust
+# User, WorkingDirectory, ExecStart, and EnvironmentFile for your
+# install before enabling.
+#
+# Usage:
+#   sudo cp deploy/consciousness-server.service.example \
+#           /etc/systemd/system/consciousness-server.service
+#   sudo $EDITOR /etc/systemd/system/consciousness-server.service
+#   sudo cp .env /etc/consciousness-server.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now consciousness-server
+#   journalctl -u consciousness-server -f
+#
+# Docker users do not need this file — see deploy/docker-compose.yml.
+
+[Unit]
+Description=consciousness-server (memory + agent bus)
+Documentation=https://github.com/build-on-ai/consciousness-server
+After=network-online.target redis-server.service
+Wants=network-online.target
+# Drop the next line if Redis runs on a different host.
+Requires=redis-server.service
+
+[Service]
+Type=simple
+
+# Replace with the unprivileged user that owns the checkout.
+User=consciousness
+Group=consciousness
+
+# Absolute path to the cloned repo. node resolves require() paths
+# relative to this directory.
+WorkingDirectory=/opt/consciousness-server
+
+# Production env file. Keep .env out of /etc; copy it once and
+# re-copy on changes. Every variable understood by the server is
+# documented in .env.example at the repo root.
+EnvironmentFile=/etc/consciousness-server.env
+
+# Entry point. core/server.js binds CONSCIOUSNESS_HOST:PORT
+# (defaults 0.0.0.0:3032 — see core/server.js:4002 and ports.yaml).
+ExecStart=/usr/bin/node core/server.js
+
+Restart=on-failure
+RestartSec=5s
+
+# Hardening — safe defaults; loosen only if your install needs it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# Allow writes only to the log/data directories the server uses.
+# Adjust if you point AUTH_OBSERVE_LOG or AGENTS_DIR elsewhere.
+ReadWritePaths=/opt/consciousness-server/logs
+
+[Install]
+WantedBy=multi-user.target
