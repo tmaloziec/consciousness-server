@@ -79,7 +79,7 @@ interface, and rotate keys the moment the host is compromised.
 
 ### test-runner executes processes
 
-`POST /api/test` on test-runner spawns a subprocess. The
+`POST /api/test/run` on test-runner spawns a subprocess. The
 `test_type` is allowlisted (`pytest` / `npm` / `vitest`) and
 invoked as `execve` argv (no shell), but the process does run with
 the container's privileges and can write anywhere inside the
