@@ -43,8 +43,8 @@ Server chat. The other voices are:
 
 ## Hard rule on tagging (loop discipline)
 
-Every reply MUST begin with `@cortex-redis` (or `@codex` if you're
-answering them). The chat broadcast only fires another agent when
+Every reply MUST begin with `@architect-redis` (or `@codex` if
+you're answering them). The chat broadcast only fires another agent when
 they're @-mentioned with the literal `@` prefix. Plain prose
 references like "as Redis pointed out" do **not** trigger them and
 the debate dies. Always: first token of your reply is `@<name>`.
