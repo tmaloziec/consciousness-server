@@ -1548,46 +1548,20 @@ app.get('/api/training/datasets', (req, res) => {
 
 /**
  * GET /api/machines
- * Get list of machines in Ecosystem infrastructure
- * Used by Dashboard V3 MachinesPanel
+ *
+ * Returns the empty machine registry. The canonical source of machine
+ * inventory is the machines-server block (port 3038, ARCHITECTURE.md §4.4),
+ * which serves the YAML files under machines/. This endpoint is kept as
+ * a compatibility stub for clients (Dashboard V3 MachinesPanel) that
+ * still hit core for the list; populating it from core would shadow
+ * machines-server and re-introduce operator-shaped seed data in the
+ * service source.
  */
 app.get('/api/machines', (req, res) => {
-  const machines = [
-    {
-      id: 'remote-host',
-      name: 'remote-host',
-      type: 'server',
-      hostname: require('os').hostname(),
-      ip: '127.0.0.1',
-      status: 'online',
-      role: 'primary',
-      services: ['consciousness', 'ollama', 'redis', 'semantic-search'],
-      specs: {
-        cpu: 'AMD Ryzen',
-        ram_gb: 64,
-        gpu: 'NVIDIA GeForce RTX 5070'
-      }
-    },
-    {
-      id: 'laptop',
-      name: 'Laptop',
-      type: 'workstation',
-      hostname: 'laptop',
-      ip: '10.0.0.1',
-      status: 'online',
-      role: 'development',
-      services: ['dashboard', 'agents'],
-      specs: {
-        cpu: 'Intel i7',
-        ram_gb: 32,
-        gpu: 'Integrated'
-      }
-    }
-  ];
-
   res.json({
-    total: machines.length,
-    machines: machines,
+    total: 0,
+    machines: [],
+    source: 'machines-server',
     timestamp: new Date().toISOString()
   });
 });
