@@ -2,9 +2,11 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-A pluggable 6-service ecosystem for multi-agent AI: shared memory,
+A pluggable service ecosystem for multi-agent AI: shared memory,
 semantic search, skills + agent registry, machines awareness, and
-ed25519 auth — all wired up with `docker compose up`.
+ed25519 auth — all wired up with `docker compose up`. The default
+profile brings up five app blocks plus Redis; key-server (`full`)
+and memory-server + Postgres (`mesh`) are opt-in.
 
 Not a framework. Not a library. A set of small HTTP services that
 your agents (Claude Code, your own CLI, any HTTP client) hit
@@ -79,9 +81,13 @@ cd deploy
 docker compose up -d
 ```
 
-The default profile brings up six blocks with `AUTH_MODE=off` so a
-solo user gets a working ecosystem without generating any keys.
-Key-server is opt-in via `--profile full`.
+The default profile brings up Redis plus five app blocks
+(`consciousness-server`, `semantic-search`, `machines-server`,
+`git-workflow`, `test-runner`) with `AUTH_MODE=off`, so a solo
+user gets a working ecosystem without generating any keys.
+`key-server` is opt-in via `--profile full`; `memory-server` +
+Postgres pgvector are opt-in via `--profile mesh` (see
+[`docs/MESH-STAGE1.md`](docs/MESH-STAGE1.md)).
 
 Cannot run Docker on this host? See
 [`docs/INSTALL-BARE-METAL.md`](docs/INSTALL-BARE-METAL.md) for the
