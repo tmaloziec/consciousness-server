@@ -83,6 +83,11 @@ The default profile brings up six blocks with `AUTH_MODE=off` so a
 solo user gets a working ecosystem without generating any keys.
 Key-server is opt-in via `--profile full`.
 
+Cannot run Docker on this host? See
+[`docs/INSTALL-BARE-METAL.md`](docs/INSTALL-BARE-METAL.md) for the
+`node core/server.js` path (env template, systemd unit, dedicated
+preflight).
+
 Verify:
 
 ```bash
