@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
- * Key Server - Centralized Secrets Management
- *
- * Provides secure HTTP API for retrieving SSH keys, API tokens, and other secrets.
+ * key-server — ed25519 signed-request verification + SSH/API key
+ * dispenser. Opt-in service (deploy/docker-compose.yml `--profile full`).
+ * Threat model: ../SECURITY.md "Key-server secrets dispenser".
  *
  * Port: 3040
  */

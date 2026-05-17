@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * memory-server — Stage 1 ingest service for the BuildOnAI Mesh roadmap.
  *
