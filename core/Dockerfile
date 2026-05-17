@@ -10,6 +10,7 @@ RUN npm install --omit=dev
 COPY server.js ./
 COPY db ./db
 COPY middleware ./middleware
+COPY generated ./generated
 
 ENV PORT=3032 \
     CONSCIOUSNESS_HOST=0.0.0.0 \
