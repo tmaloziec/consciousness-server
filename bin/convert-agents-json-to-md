@@ -1,0 +1,58 @@
+#!/bin/bash
+# convert-agents-json-to-md — migrate v0.1.0 agent registry to v1.1.0 format.
+#
+# v0.1.0 stored each agent as <NAME>.json with an embedded `claude_md` string.
+# v1.1.0 reads <NAME>.md directly. This script converts a v0.1.0 directory
+# of JSON files into a v1.1.0 directory of plain markdown files.
+#
+# Usage:
+#   convert-agents-json-to-md <input_dir> <output_dir>
+#
+# Input  directory: must contain one or more <NAME>.json files, each with a
+#                   top-level `claude_md` string field.
+# Output directory: created if missing; one <NAME>.md per input file.
+#
+# Requires: jq
+
+set -euo pipefail
+
+IN_DIR="${1:?usage: convert-agents-json-to-md <input_dir> <output_dir>}"
+OUT_DIR="${2:?usage: convert-agents-json-to-md <input_dir> <output_dir>}"
+
+if [ ! -d "$IN_DIR" ]; then
+  echo "input directory does not exist: $IN_DIR" >&2
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is required but not installed" >&2
+  exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+
+count=0
+skipped=0
+for json_file in "$IN_DIR"/*.json; do
+  [ -f "$json_file" ] || continue
+
+  name="$(basename "$json_file" .json)"
+  out_file="$OUT_DIR/${name}.md"
+
+  # Extract claude_md; treat null/empty as "skip with warning".
+  body="$(jq -r '.claude_md // empty' "$json_file")"
+
+  if [ -z "$body" ]; then
+    echo "warn: $name.json has no .claude_md field, skipping" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  printf '%s\n' "$body" > "$out_file"
+  echo "converted: $name.json -> $name.md ($(wc -c < "$out_file") bytes)"
+  count=$((count + 1))
+done
+
+echo ""
+echo "done: $count converted, $skipped skipped"
+echo "next: set AGENTS_DIR=$OUT_DIR in your service environment and restart the server"
