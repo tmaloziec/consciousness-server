@@ -106,9 +106,12 @@ migration.
   over, every signed request can be forged. If Redis is taken
   over, every stored memory can be tampered. Isolation between
   blocks is container-level, not trust-level.
-- Supply-chain attacks on dependencies. Dependencies are pinned in
-  `core/package.json`, `*/requirements.txt` and not audited per
-  release.
+- Supply-chain attacks on dependencies. Direct deps live as caret
+  ranges in `*/package.json` and lower-bound pins in
+  `*/requirements.txt` / `bin/requirements.txt`. Exact resolved
+  versions are locked in tracked `package-lock.json` files and
+  `npm ci` enforces them at build time, but the lockfiles are not
+  audited per release.
 
 ## Reporting a vulnerability
 
