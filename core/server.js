@@ -20,6 +20,8 @@ const { WebSocketServer } = require('ws');
 const { ownPort } = require('./middleware/ports');
 const { NoteTypeValues, TaskStatusValues } = require('./generated/schemas');
 
+const SERVER_VERSION = require('./package.json').version;
+
 const app = express();
 const PORT = ownPort('consciousness-server', 3032);
 
@@ -657,7 +659,7 @@ app.get('/health', async (req, res) => {
   res.json({
     status: 'ok',
     uptime: Math.floor(uptime),
-    version: '0.1.0-mvp',
+    version: SERVER_VERSION,
     memory: {
       tasks: tasks.length,
       logs: logs.length,
