@@ -133,7 +133,9 @@ a block. If you want to *change how it deploys*, you edit `deploy/`.
 
 ## 2. Blocks
 
-Six blocks in the default profile, one opt-in under `--profile full`.
+Five app blocks plus Redis in the default profile; one opt-in
+under `--profile full` (auth) and two opt-in under `--profile mesh`
+(Stage-1 mesh storage).
 
 | Block | Port | Profile | Lang | Purpose |
 |---|---|---|---|---|
@@ -143,6 +145,8 @@ Six blocks in the default profile, one opt-in under `--profile full`.
 | **test-runner** | 3041 | default | Flask | Async pytest/npm/vitest execution. Validated test-type allowlist, no shell interpolation |
 | **git-workflow** | 3042 | default | stdlib | `POST /api/git/hook/post-commit` receiver → SQLite |
 | **key-server** | 3040 | `full` | Node | ed25519 signed-request verification. Pub keys in `key-server/keys/agents/*.pub`. Audit log at `deploy/volumes/key-server-logs/audit.jsonl` |
+| **memory-postgres** | 5432 | `mesh` | Postgres + pgvector | Backing store for `memory-server`. See [`docs/MESH-STAGE1.md`](docs/MESH-STAGE1.md). |
+| **memory-server** | 3045 | `mesh` | Node | Stage-1 ingest service: chunk-level offsets + embeddings into Postgres. Substrate for the Stage-2 Mesh PoC. |
 
 ### 2.1 External dependencies (not in repo)
 
@@ -404,7 +408,8 @@ The document leads the code.
 
 ### 7.1 What ships in v1
 
-- Six blocks (above) + Redis + Ollama (host) + three AUTH_MODEs
+- Five default app blocks + Redis + Ollama (host) + three AUTH_MODEs;
+  `key-server` (auth) and `memory-server` + Postgres (mesh) opt-in
 - Memory API: conversations, training, summaries, notes, tasks
 - ChromaDB auto-embedding only for summaries
 - ed25519 signed-request protocol with nonce anti-replay
